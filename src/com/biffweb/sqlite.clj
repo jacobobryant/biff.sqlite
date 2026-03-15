@@ -3,11 +3,12 @@
    Adapted from biff.next/resources/sqlite.clj."
   (:require
    [clojure.java.io :as io]
-   [clojure.java.shell :as shell]
+   [clojure.java.process :as process]
    [clojure.string :as str]
    [clojure.tools.logging :as log]
    [com.biffweb.sqlite.inference :as inference]
    [com.biffweb.sqlite.litestream :as litestream]
+   [com.biffweb.sqlite.sqlite3def :as sqlite3def]
    [honey.sql :as hsql]
    [malli.core :as malli]
    [malli.registry :as malr]
@@ -468,7 +469,7 @@
 (defn apply-schema!
   "Generate schema SQL from malli, concatenate with indexes, write to schema-path,
    and run sqlite3def to apply migrations."
-  [db-path schema-path malli-opts indexes-sql]
+  [db-path schema-path malli-opts indexes-sql sqlite3def-path]
   (io/make-parents db-path)
   (io/make-parents schema-path)
   (let [schema-sql (generate-schema-sql malli-opts)
@@ -476,11 +477,9 @@
                       schema-sql
                       (when (not-empty indexes-sql) (str "\n\n" indexes-sql)))
         _ (spit schema-path full-sql)
-        {:keys [exit out err]} (shell/sh "sqlite3def" db-path "--apply" "-f" schema-path)]
-    (when (not-empty out) (print out))
-    (when (not-empty err) (binding [*out* *err*] (print err)))
-    (when-not (zero? exit)
-      (throw (ex-info "sqlite3def failed" {:exit exit :err err})))))
+        result (process/exec sqlite3def-path db-path "--apply" "-f" schema-path)]
+    (when (not-empty result)
+      (log/info result))))
 
 (def ^:private memoized-infer-columns
   "Memoized version of inference/infer-columns. Returns nil on parse failure
@@ -539,20 +538,30 @@
    If litestream config is present, automatically handles binary download, DB
    restore from S3 (if no local DB exists), and starts continuous replication.
 
-   Litestream config (all :litestream/* keys):
-     :litestream/s3-bucket           - S3 bucket name (required)
-     :litestream/s3-access-key-id    - AWS access key (required)
-     :litestream/s3-secret-access-key - fn that returns AWS secret key (required)
-     :litestream/s3-path             - Subdirectory within bucket (optional)
-     :litestream/s3-endpoint         - Custom S3 endpoint URL (optional)
-     :litestream/s3-region           - AWS region (optional)"
-  [{:biff.sqlite/keys [db-path]
+   Both sqlite3def and litestream binaries are auto-installed if not found globally.
+   Use :biff.sqlite/sqlite3def-version and :biff.sqlite/litestream-version to
+   override the default versions.
+
+   Litestream config (all :biff.sqlite/litestream-* keys):
+     :biff.sqlite/litestream-bucket           - S3 bucket name (required)
+     :biff.sqlite/litestream-access-key-id    - AWS access key (required)
+     :biff.sqlite/litestream-secret-access-key - fn that returns AWS secret key (required)
+     :biff.sqlite/litestream-path             - Subdirectory within bucket (optional)
+     :biff.sqlite/litestream-endpoint         - Custom S3 endpoint URL (optional)
+     :biff.sqlite/litestream-region           - AWS region (optional)
+     :biff.sqlite/litestream-version          - Litestream version to install (optional)
+
+   sqlite3def config:
+     :biff.sqlite/sqlite3def-version - sqlite3def version to install (optional)"
+  [{:biff.sqlite/keys [db-path sqlite3def-version]
     :or {db-path "storage/sqlite/main.db"}
     :as ctx}]
   (let [ctx (litestream/use-litestream ctx)
+        sqlite3def-path (sqlite3def/resolve-bin!
+                         (or sqlite3def-version sqlite3def/default-version))
         indexes-sql (some-> (io/resource "indexes.sql") slurp)
         _ (apply-schema! db-path "resources/schema.sql"
-                         (:biff/malli-opts ctx) indexes-sql)
+                         (:biff/malli-opts ctx) indexes-sql sqlite3def-path)
         datasource (start-pool db-path)]
     (log/info "SQLite connection pool started at" db-path)
     (-> ctx
