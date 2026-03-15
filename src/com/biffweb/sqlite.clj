@@ -539,17 +539,17 @@
    restore from S3 (if no local DB exists), and starts continuous replication.
 
    Both sqlite3def and litestream binaries are auto-installed if not found globally.
-   Use :biff.sqlite/sqlite3def-version and :litestream/version to override the
-   default versions.
+   Use :biff.sqlite/sqlite3def-version and :biff.sqlite/litestream-version to
+   override the default versions.
 
-   Litestream config (all :litestream/* keys):
-     :litestream/s3-bucket           - S3 bucket name (required)
-     :litestream/s3-access-key-id    - AWS access key (required)
-     :litestream/s3-secret-access-key - fn that returns AWS secret key (required)
-     :litestream/s3-path             - Subdirectory within bucket (optional)
-     :litestream/s3-endpoint         - Custom S3 endpoint URL (optional)
-     :litestream/s3-region           - AWS region (optional)
-     :litestream/version             - Litestream version to install (optional)
+   Litestream config (all :biff.sqlite/litestream-* keys):
+     :biff.sqlite/litestream-bucket           - S3 bucket name (required)
+     :biff.sqlite/litestream-access-key-id    - AWS access key (required)
+     :biff.sqlite/litestream-secret-access-key - fn that returns AWS secret key (required)
+     :biff.sqlite/litestream-path             - Subdirectory within bucket (optional)
+     :biff.sqlite/litestream-endpoint         - Custom S3 endpoint URL (optional)
+     :biff.sqlite/litestream-region           - AWS region (optional)
+     :biff.sqlite/litestream-version          - Litestream version to install (optional)
 
    sqlite3def config:
      :biff.sqlite/sqlite3def-version - sqlite3def version to install (optional)"

@@ -15,18 +15,18 @@
 
   (testing "returns false when only bucket is present"
     (is (not (litestream/configured?
-              {:litestream/s3-bucket "my-bucket"}))))
+              {:biff.sqlite/litestream-bucket "my-bucket"}))))
 
   (testing "returns false when key is missing"
     (is (not (litestream/configured?
-              {:litestream/s3-bucket "my-bucket"
-               :litestream/s3-access-key-id "key"}))))
+              {:biff.sqlite/litestream-bucket "my-bucket"
+               :biff.sqlite/litestream-access-key-id "key"}))))
 
   (testing "returns true when all required config is present"
     (is (litestream/configured?
-         {:litestream/s3-bucket "my-bucket"
-          :litestream/s3-access-key-id "key"
-          :litestream/s3-secret-access-key "secret"}))))
+         {:biff.sqlite/litestream-bucket "my-bucket"
+          :biff.sqlite/litestream-access-key-id "key"
+          :biff.sqlite/litestream-secret-access-key "secret"}))))
 
 (deftest use-litestream-skips-when-not-configured
   (testing "returns context unchanged when S3 config is absent"
@@ -43,12 +43,12 @@
                     litestream/litestream-config-path (fn [] (str dir "/litestream.yml"))]
         (#'litestream/write-config!
          {:biff.sqlite/db-path "storage/sqlite/main.db"
-          :litestream/s3-bucket "my-bucket"
-          :litestream/s3-path "myapp"
-          :litestream/s3-endpoint "https://s3.us-east-1.amazonaws.com"
-          :litestream/s3-region "us-east-1"
-          :litestream/s3-access-key-id "AKID"
-          :litestream/s3-secret-access-key (constantly "SECRET")})
+          :biff.sqlite/litestream-bucket "my-bucket"
+          :biff.sqlite/litestream-path "myapp"
+          :biff.sqlite/litestream-endpoint "https://s3.us-east-1.amazonaws.com"
+          :biff.sqlite/litestream-region "us-east-1"
+          :biff.sqlite/litestream-access-key-id "AKID"
+          :biff.sqlite/litestream-secret-access-key (constantly "SECRET")})
         (let [config (slurp (str dir "/litestream.yml"))]
           (is (str/includes? config "path: storage/sqlite/main.db"))
           (is (str/includes? config "bucket: my-bucket"))

@@ -109,32 +109,32 @@
 
 (defn- credential-env
   "Returns env var map for litestream subprocess with S3 credentials."
-  [{:litestream/keys [s3-access-key-id s3-secret-access-key]}]
-  {"LITESTREAM_ACCESS_KEY_ID" (str s3-access-key-id)
-   "LITESTREAM_SECRET_ACCESS_KEY" (if (fn? s3-secret-access-key)
-                                    (s3-secret-access-key)
-                                    (str s3-secret-access-key))})
+  [{:biff.sqlite/keys [litestream-access-key-id litestream-secret-access-key]}]
+  {"LITESTREAM_ACCESS_KEY_ID" (str litestream-access-key-id)
+   "LITESTREAM_SECRET_ACCESS_KEY" (if (fn? litestream-secret-access-key)
+                                    (litestream-secret-access-key)
+                                    (str litestream-secret-access-key))})
 
 (defn- write-config!
   "Generates litestream YAML config file.
    Uses env var references for secrets so credentials aren't written to disk."
-  [{:biff.sqlite/keys [db-path]
-    :litestream/keys [s3-bucket s3-path s3-endpoint s3-region]
+  [{:biff.sqlite/keys [db-path litestream-bucket litestream-path
+                       litestream-endpoint litestream-region]
     :or {db-path "storage/sqlite/main.db"}}]
-  (let [replica-path (if (str/blank? s3-path)
+  (let [replica-path (if (str/blank? litestream-path)
                        (str/replace db-path #"^.*/" "")
-                       (str (str/replace s3-path #"/$" "") "/"
+                       (str (str/replace litestream-path #"/$" "") "/"
                             (str/replace db-path #"^.*/" "")))
         config (str "dbs:\n"
                     "  - path: " db-path "\n"
                     "    replicas:\n"
                     "      - type: s3\n"
-                    "        bucket: " s3-bucket "\n"
+                    "        bucket: " litestream-bucket "\n"
                     "        path: " replica-path "\n"
-                    (when s3-endpoint
-                      (str "        endpoint: " s3-endpoint "\n"))
-                    (when s3-region
-                      (str "        region: " s3-region "\n"))
+                    (when litestream-endpoint
+                      (str "        endpoint: " litestream-endpoint "\n"))
+                    (when litestream-region
+                      (str "        region: " litestream-region "\n"))
                     "        access-key-id: $LITESTREAM_ACCESS_KEY_ID\n"
                     "        secret-access-key: $LITESTREAM_SECRET_ACCESS_KEY\n")]
     (.mkdirs (io/file litestream-dir))
@@ -218,17 +218,17 @@
 
 (defn configured?
   "Returns true if the required litestream S3 config is present."
-  [{:litestream/keys [s3-bucket s3-access-key-id s3-secret-access-key]}]
-  (and (some? s3-bucket)
-       (some? s3-access-key-id)
-       (some? s3-secret-access-key)))
+  [{:biff.sqlite/keys [litestream-bucket litestream-access-key-id litestream-secret-access-key]}]
+  (and (some? litestream-bucket)
+       (some? litestream-access-key-id)
+       (some? litestream-secret-access-key)))
 
 (defn use-litestream
   [ctx]
   (if-not (configured? ctx)
     (do (log/info "Litestream: S3 config not present, skipping")
         ctx)
-    (let [version (or (:litestream/version ctx) default-version)
+    (let [version (or (:biff.sqlite/litestream-version ctx) default-version)
           bin-path (resolve-bin! version)]
       (write-config! ctx)
       (restore! ctx bin-path)
