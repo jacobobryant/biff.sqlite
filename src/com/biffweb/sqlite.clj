@@ -549,7 +549,7 @@
   [{:biff.sqlite/keys [db-path]
     :or {db-path "storage/sqlite/main.db"}
     :as ctx}]
-  (let [ctx (litestream/start! ctx)
+  (let [ctx (litestream/use-litestream ctx)
         indexes-sql (some-> (io/resource "indexes.sql") slurp)
         _ (apply-schema! db-path "resources/schema.sql"
                          (:biff/malli-opts ctx) indexes-sql)

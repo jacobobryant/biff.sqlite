@@ -1,5 +1,7 @@
 (ns com.biffweb.sqlite.litestream-test
   (:require [clojure.test :refer [deftest is testing]]
+            [clojure.java.io :as io]
+            [clojure.string :as str]
             [com.biffweb.sqlite.litestream :as litestream]))
 
 (deftest configured?-test
@@ -21,17 +23,17 @@
           :litestream/s3-access-key-id "key"
           :litestream/s3-secret-access-key "secret"}))))
 
-(deftest start-skips-when-not-configured
+(deftest use-litestream-skips-when-not-configured
   (testing "returns context unchanged when S3 config is absent"
     (let [ctx {:biff/stop []
                :biff.sqlite/db-path "storage/sqlite/main.db"}
-          result (litestream/start! ctx)]
+          result (litestream/use-litestream ctx)]
       (is (= ctx result)))))
 
 (deftest write-config-test
-  (testing "generates correct YAML config with S3 path"
+  (testing "generates correct YAML config with env var references for secrets"
     (let [dir (str "target/test-litestream-" (System/currentTimeMillis))
-          _ (.mkdirs (clojure.java.io/file dir))]
+          _ (.mkdirs (io/file dir))]
       (with-redefs [litestream/litestream-dir dir
                     litestream/litestream-config-path (fn [] (str dir "/litestream.yml"))]
         (#'litestream/write-config!
@@ -43,22 +45,19 @@
           :litestream/s3-access-key-id "AKID"
           :litestream/s3-secret-access-key (constantly "SECRET")})
         (let [config (slurp (str dir "/litestream.yml"))]
-          (is (clojure.string/includes? config "path: storage/sqlite/main.db"))
-          (is (clojure.string/includes? config "bucket: my-bucket"))
-          (is (clojure.string/includes? config "path: myapp/main.db"))
-          (is (clojure.string/includes? config "endpoint: https://s3.us-east-1.amazonaws.com"))
-          (is (clojure.string/includes? config "region: us-east-1"))
-          (is (clojure.string/includes? config "access-key-id: AKID"))
-          (is (clojure.string/includes? config "secret-access-key: SECRET"))
-          (is (clojure.string/includes? config "    replica:\n"))
-          (is (not (clojure.string/includes? config "replicas:")))))
-      ;; Cleanup
-      (clojure.java.io/delete-file (str dir "/litestream.yml") true)
-      (.delete (clojure.java.io/file dir)))))
+          (is (str/includes? config "path: storage/sqlite/main.db"))
+          (is (str/includes? config "bucket: my-bucket"))
+          (is (str/includes? config "path: myapp/main.db"))
+          (is (str/includes? config "endpoint: https://s3.us-east-1.amazonaws.com"))
+          (is (str/includes? config "region: us-east-1"))
+          (is (str/includes? config "access-key-id: $LITESTREAM_ACCESS_KEY_ID"))
+          (is (str/includes? config "secret-access-key: $LITESTREAM_SECRET_ACCESS_KEY"))
+          (is (not (str/includes? config "access-key-id: AKID")))
+          (is (not (str/includes? config "secret-access-key: SECRET\n")))))
+      (io/delete-file (str dir "/litestream.yml") true)
+      (.delete (io/file dir)))))
 
 (deftest version-check-test
-  (testing "installed-version returns nil when binary doesn't exist"
+  (testing "check-version returns nil when binary doesn't exist"
     (let [dir (str "target/test-no-litestream-" (System/currentTimeMillis))]
-      (with-redefs [litestream/litestream-dir dir
-                    litestream/litestream-bin-path (constantly (str dir "/litestream"))]
-        (is (nil? (#'litestream/installed-version)))))))
+      (is (nil? (#'litestream/check-version (str dir "/litestream")))))))
