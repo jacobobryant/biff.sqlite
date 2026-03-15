@@ -4,6 +4,11 @@
             [clojure.string :as str]
             [com.biffweb.sqlite.litestream :as litestream]))
 
+(deftest default-version-test
+  (testing "has a default version set"
+    (is (string? litestream/default-version))
+    (is (re-matches #"\d+\.\d+\.\d+" litestream/default-version))))
+
 (deftest configured?-test
   (testing "returns false when no S3 config is present"
     (is (not (litestream/configured? {}))))

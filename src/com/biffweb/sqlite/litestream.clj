@@ -9,7 +9,7 @@
   (:import [java.nio.file Files Paths]
            [java.nio.file.attribute PosixFilePermission]))
 
-(def litestream-version "0.5.9")
+(def default-version "0.5.9")
 
 (def litestream-dir "storage/litestream")
 
@@ -24,7 +24,7 @@
 
 (defn- infer-download-filename
   "Infers the correct litestream release filename for the current platform."
-  []
+  [version]
   (let [os-name (str/lower-case (System/getProperty "os.name"))
         os-type (cond
                   (str/includes? os-name "linux") "linux"
@@ -43,7 +43,7 @@
                                     "). Please install it manually.")
                                {:os.arch (System/getProperty "os.arch")})))
         ext (if (= os-type "windows") "zip" "tar.gz")]
-    (str "litestream-" litestream-version "-" os-type "-" arch "." ext)))
+    (str "litestream-" version "-" os-type "-" arch "." ext)))
 
 (defn- find-global-litestream
   "Returns \"litestream\" if a globally installed litestream is found on PATH, or nil."
@@ -66,10 +66,10 @@
 
 (defn- download-and-extract!
   "Downloads litestream binary from GitHub releases and extracts it."
-  []
-  (let [filename (infer-download-filename)
+  [version]
+  (let [filename (infer-download-filename version)
         url (str "https://github.com/benbjohnson/litestream/releases/download/v"
-                 litestream-version "/" filename)
+                 version "/" filename)
         archive-path (str litestream-dir "/" filename)
         bin-path (local-bin-path)]
     (log/info "Downloading litestream from" url)
@@ -92,19 +92,19 @@
 
 (defn- ensure-local-binary!
   "Downloads litestream to local dir if not present or version mismatch."
-  []
+  [version]
   (let [current (check-version (local-bin-path))]
-    (when (not= current litestream-version)
+    (when (not= current version)
       (when current
         (log/info "Litestream version mismatch: installed" current
-                  "expected" litestream-version))
-      (download-and-extract!))))
+                  "expected" version))
+      (download-and-extract! version))))
 
 (defn- resolve-bin!
   "Returns the path to the litestream binary to use. Prefers global install."
-  []
+  [version]
   (or (find-global-litestream)
-      (do (ensure-local-binary!)
+      (do (ensure-local-binary! version)
           (local-bin-path))))
 
 (defn- credential-env
@@ -228,7 +228,8 @@
   (if-not (configured? ctx)
     (do (log/info "Litestream: S3 config not present, skipping")
         ctx)
-    (let [bin-path (resolve-bin!)]
+    (let [version (or (:litestream/version ctx) default-version)
+          bin-path (resolve-bin! version)]
       (write-config! ctx)
       (restore! ctx bin-path)
       (let [process (start-replicate! ctx bin-path)]
