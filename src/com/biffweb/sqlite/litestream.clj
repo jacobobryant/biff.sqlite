@@ -31,12 +31,16 @@
                   (or (str/includes? os-name "mac")
                       (str/includes? os-name "darwin")) "darwin"
                   (str/includes? os-name "windows") "windows"
-                  :else (throw (ex-info "Unsupported OS for litestream"
+                  :else (throw (ex-info (str "Unable to auto-install litestream (unsupported OS: "
+                                             (System/getProperty "os.name")
+                                             "). Please install it manually.")
                                         {:os.name (System/getProperty "os.name")})))
         arch (case (System/getProperty "os.arch")
                ("amd64" "x86_64") "x86_64"
                "aarch64" "arm64"
-               (throw (ex-info "Unsupported architecture for litestream"
+               (throw (ex-info (str "Unable to auto-install litestream (unsupported architecture: "
+                                    (System/getProperty "os.arch")
+                                    "). Please install it manually.")
                                {:os.arch (System/getProperty "os.arch")})))
         ext (if (= os-type "windows") "zip" "tar.gz")]
     (str "litestream-" litestream-version "-" os-type "-" arch "." ext)))
@@ -45,23 +49,17 @@
   "Returns \"litestream\" if a globally installed litestream is found on PATH, or nil."
   []
   (try
-    (let [proc (process/start {:redirect-err true} "litestream" "version")
-          output (str/trim (slurp (.getInputStream proc)))]
-      (.waitFor proc)
-      (when (zero? (.exitValue proc))
-        (log/info "Found globally installed litestream:" output)
-        "litestream"))
+    (let [output (str/trim (process/exec "litestream" "version"))]
+      (log/info "Found globally installed litestream:" output)
+      "litestream")
     (catch Exception _ nil)))
 
 (defn- check-version
   "Returns the version string of the litestream binary at the given path, or nil."
   [bin-path]
   (try
-    (let [proc (process/start {:redirect-err true} bin-path "version")
-          output (str/trim (slurp (.getInputStream proc)))]
-      (.waitFor proc)
-      (when (zero? (.exitValue proc))
-        (some->> output not-empty (re-find #"[\d]+\.[\d]+\.[\d]+"))))
+    (let [output (str/trim (process/exec bin-path "version"))]
+      (some->> output not-empty (re-find #"[\d]+\.[\d]+\.[\d]+")))
     (catch Exception e
       (log/warn "Failed to check litestream version:" (.getMessage e))
       nil)))
@@ -151,12 +149,9 @@
     :as ctx}
    bin-path]
   (let [db-file (io/file db-path)]
-    (cond
-      (.exists db-file)
+    (if (.exists db-file)
       (do (log/info "Local database exists, skipping restore")
           false)
-
-      :else
       (do (log/info "No local database found, attempting restore from S3...")
           (.mkdirs (.getParentFile db-file))
           (let [env (credential-env ctx)
@@ -185,16 +180,23 @@
   [ctx bin-path]
   (log/info "Starting litestream replicate...")
   (let [env (credential-env ctx)
-        proc (process/start {:redirect-err true :env env}
+        proc (process/start {:env env}
                             bin-path "replicate"
                             "-config" (litestream-config-path))]
     (.start (Thread. (fn []
                        (try
-                         (with-open [reader (io/reader (.getInputStream proc))]
+                         (with-open [reader (io/reader (process/stdout proc))]
                            (doseq [line (line-seq reader)]
                              (log/info "[litestream]" line)))
                          (catch Exception e
-                           (log/error e "Error reading litestream output"))))))
+                           (log/error e "Error reading litestream stdout"))))))
+    (.start (Thread. (fn []
+                       (try
+                         (with-open [reader (io/reader (process/stderr proc))]
+                           (doseq [line (line-seq reader)]
+                             (log/error "[litestream]" line)))
+                         (catch Exception e
+                           (log/error e "Error reading litestream stderr"))))))
     (Thread/sleep 1000)
     (when-not (.isAlive proc)
       (throw (ex-info "Litestream replicate failed to start"
@@ -222,18 +224,6 @@
        (some? s3-secret-access-key)))
 
 (defn use-litestream
-  "Biff component for Litestream SQLite replication.
-   Place BEFORE biff.sqlite/use-sqlite in the component list.
-
-   Required config:
-     :litestream/s3-bucket           - S3 bucket name
-     :litestream/s3-access-key-id    - AWS access key
-     :litestream/s3-secret-access-key - fn that returns AWS secret key
-
-   Optional config:
-     :litestream/s3-path     - Subdirectory within bucket
-     :litestream/s3-endpoint - Custom S3 endpoint URL
-     :litestream/s3-region   - AWS region (e.g. \"us-east-1\")"
   [ctx]
   (if-not (configured? ctx)
     (do (log/info "Litestream: S3 config not present, skipping")
