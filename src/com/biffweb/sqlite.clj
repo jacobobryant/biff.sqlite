@@ -7,6 +7,7 @@
    [clojure.string :as str]
    [clojure.tools.logging :as log]
    [com.biffweb.sqlite.inference :as inference]
+   [com.biffweb.sqlite.litestream :as litestream]
    [honey.sql :as hsql]
    [malli.core :as malli]
    [malli.registry :as malr]
@@ -533,11 +534,23 @@
 
 (defn use-sqlite
   "Biff component that runs schema migrations and starts a HikariCP connection pool.
-   Adds :biff/conn to the system context."
+   Adds :biff/conn to the system context.
+
+   If litestream config is present, automatically handles binary download, DB
+   restore from S3 (if no local DB exists), and starts continuous replication.
+
+   Litestream config (all :litestream/* keys):
+     :litestream/s3-bucket           - S3 bucket name (required)
+     :litestream/s3-access-key-id    - AWS access key (required)
+     :litestream/s3-secret-access-key - fn that returns AWS secret key (required)
+     :litestream/s3-path             - Subdirectory within bucket (optional)
+     :litestream/s3-endpoint         - Custom S3 endpoint URL (optional)
+     :litestream/s3-region           - AWS region (optional)"
   [{:biff.sqlite/keys [db-path]
     :or {db-path "storage/sqlite/main.db"}
     :as ctx}]
-  (let [indexes-sql (some-> (io/resource "indexes.sql") slurp)
+  (let [ctx (litestream/use-litestream ctx)
+        indexes-sql (some-> (io/resource "indexes.sql") slurp)
         _ (apply-schema! db-path "resources/schema.sql"
                          (:biff/malli-opts ctx) indexes-sql)
         datasource (start-pool db-path)]
