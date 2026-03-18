@@ -280,26 +280,133 @@
                           attrs)))
         info))
 
+;; ============================================================================
+;; Namespaced Alias Support
+;; ============================================================================
+
+(defn- keyword->sql-label
+  "Convert a keyword to a SQL column label string, replacing hyphens with
+   underscores. Namespaced keywords produce 'ns/name' format.
+   :user/joined-at -> \"user/joined_at\"
+   :cnt -> \"cnt\""
+  [kw]
+  (if (namespace kw)
+    (str (str/replace (namespace kw) "-" "_")
+         "/"
+         (str/replace (name kw) "-" "_"))
+    (str/replace (name kw) "-" "_")))
+
+(defn- encode-namespaced-alias
+  "Encode a namespaced keyword as a quoted string for use as a SQL alias.
+   HoneySQL formats string aliases as quoted identifiers.
+   :user/joined-at -> \"user/joined_at\""
+  [kw]
+  (keyword->sql-label kw))
+
+(defn- preprocess-select
+  "Walk a HoneySQL :select clause and encode namespaced keyword aliases
+   as strings. In HoneySQL, a 2-element vector [expr alias] where alias
+   is a namespaced keyword like :user/age would be formatted as
+   'expr AS user.age' (broken). By converting the alias to a string like
+   \"user/age\", HoneySQL formats it as 'expr AS \"user/age\"' (correct)."
+  [select]
+  (cond
+    (keyword? select) select
+    (vector? select)
+    (mapv (fn [item]
+            (if (and (vector? item)
+                     (= 2 (count item))
+                     (keyword? (second item))
+                     (namespace (second item)))
+              [(first item) (encode-namespaced-alias (second item))]
+              item))
+          select)
+    :else select))
+
+(defn- preprocess-honeysql
+  "Pre-process a HoneySQL map:
+   1. Encode namespaced keyword aliases in :select as quoted strings
+   2. Extract :biff/column-types (not a HoneySQL key)
+   Returns [processed-input column-types has-namespaced-aliases?]."
+  [input]
+  (let [column-types (:biff/column-types input)
+        input (dissoc input :biff/column-types)
+        select (:select input)
+        has-ns-aliases? (and (vector? select)
+                             (some (fn [item]
+                                     (and (vector? item)
+                                          (= 2 (count item))
+                                          (keyword? (second item))
+                                          (namespace (second item))))
+                                   select))
+        input (if has-ns-aliases?
+                (assoc input :select (preprocess-select select))
+                input)]
+    [input column-types (boolean has-ns-aliases?)]))
+
+(defn- build-explicit-coercions
+  "Build a map from SQL column label (string) to coerce-fn from explicit
+   :biff/column-types. Keys are keywords, values are coercion types
+   (:uuid, :inst, :bool, :nippy, or {:enum {...}})."
+  [column-types]
+  (when column-types
+    (into {}
+          (keep (fn [[kw coerce-type]]
+                  (when-let [coerce-fn (get-coerce-read-fn coerce-type)]
+                    [(keyword->sql-label kw) coerce-fn])))
+          column-types)))
+
+(defn- fix-namespaced-alias-keys
+  "Fix result map keys that have double-qualified namespaces from JDBC.
+   When SQLite provides a table name for an aliased column whose label
+   contains '/', as-kebab-maps creates keys like :user/item/created-at
+   (namespace='user', name='item/created-at'). This fixes them to
+   :item/created-at by splitting the name on '/'."
+  [m]
+  (reduce-kv
+    (fn [acc k v]
+      (let [n (name k)]
+        (if-let [slash-idx (str/index-of n "/")]
+          (assoc acc (keyword (subs n 0 slash-idx) (subs n (inc slash-idx))) v)
+          (assoc acc k v))))
+    {}
+    m))
+
 (defn- make-column-reader
   "Create a column reader fn for rs/builder-adapter that applies read coercions.
    read-coercions is a map from SQL column name (string) to coerce-fn.
    inferred-columns is an optional vector of inferred column maps from
    inference/infer-columns, used as a fallback when column name is not found
    in read-coercions.
+   explicit-coercions is an optional map from SQL column label to coerce-fn
+   from :biff/column-types.
    Prefers table-qualified lookups ('table.column') to avoid collisions when
    multiple tables have columns with the same unqualified name."
-  [read-coercions inferred-columns]
+  [read-coercions inferred-columns explicit-coercions]
   (fn [builder ^ResultSet rs ^Integer i]
     (let [meta (.getMetaData rs)
           col-name (.getColumnLabel meta i)
           table-name (.getTableName meta i)
           value (.getObject rs i)
-          coerce-fn (or (when (and table-name (not= table-name ""))
-                          (get read-coercions (str table-name "." col-name)))
-                        (get read-coercions col-name)
-                        (when-let [{:keys [column]} (get inferred-columns (dec i))]
-                          (when (and column (not= "*" column))
-                            (get read-coercions column))))
+          coerce-fn (or
+                      ;; 1. Explicit column types (highest priority)
+                      (when explicit-coercions
+                        (get explicit-coercions col-name))
+                      ;; 2. Table-qualified lookup from malli schema
+                      (when (and table-name (not= table-name ""))
+                        (get read-coercions (str table-name "." col-name)))
+                      ;; 3. Unqualified lookup from malli schema
+                      (get read-coercions col-name)
+                      ;; 4. Namespaced alias: col-name contains "/"
+                      (when-let [slash-idx (str/index-of col-name "/")]
+                        (let [ns-part (subs col-name 0 slash-idx)
+                              name-part (subs col-name (inc slash-idx))]
+                          (or (get read-coercions (str ns-part "." name-part))
+                              (get read-coercions name-part))))
+                      ;; 5. Inference fallback
+                      (when-let [{:keys [column]} (get inferred-columns (dec i))]
+                        (when (and column (not= "*" column))
+                          (get read-coercions column))))
           coerced-value (if (and coerce-fn (some? value))
                           (coerce-fn value)
                           value)]
@@ -508,10 +615,21 @@
    SQL vector. Returns results as qualified kebab-case maps with read coercions
    applied automatically. Write coercions are applied to parameters.
    ctx is the system map, from which :biff/conn and :biff/malli-opts are used.
-   Write statements are executed under a lock to avoid contention."
+   Write statements are executed under a lock to avoid contention.
+
+   HoneySQL maps support two additional keys:
+   - :biff/column-types - map from result keyword to coercion type (:uuid, :inst,
+     :bool, :nippy, or {:enum {...}}). Used for computed columns that don't exist
+     in the malli schema.
+   - Namespaced keyword aliases in :select are automatically encoded as quoted
+     SQL identifiers, so {:select [[:joined-at :user/joined-at]]} works correctly."
   [ctx input]
   (let [{:biff/keys [conn malli-opts]} ctx
         {:keys [read-coercions enum-val->int]} (memoized-coercions malli-opts)
+        [input column-types has-ns-aliases?]
+        (if (map? input)
+          (preprocess-honeysql input)
+          [input nil false])
         sql-vec (cond
                   (map? input) (hsql/format input)
                   (string? input) [input]
@@ -520,12 +638,16 @@
                   (into [(first sql-vec)] (coerce-params enum-val->int (rest sql-vec)))
                   sql-vec)
         inferred-columns (memoized-infer-columns (first sql-vec))
-        column-reader (make-column-reader read-coercions inferred-columns)
+        explicit-coercions (build-explicit-coercions column-types)
+        column-reader (make-column-reader read-coercions inferred-columns explicit-coercions)
         opts {:builder-fn (rs/builder-adapter rs/as-kebab-maps column-reader)}
-        run #(jdbc/execute! conn sql-vec opts)]
-    (if (write-statement? (first sql-vec))
-      (locking write-lock (run))
-      (run))))
+        run #(jdbc/execute! conn sql-vec opts)
+        results (if (write-statement? (first sql-vec))
+                  (locking write-lock (run))
+                  (run))]
+    (if has-ns-aliases?
+      (mapv fix-namespaced-alias-keys results)
+      results)))
 
 ;; ============================================================================
 ;; Component
