@@ -333,10 +333,29 @@
 ;; Public API
 ;; ============================================================================
 
+(defn- merge-union-columns
+  "Given a sequence of inferred-column vectors (one per select_core in a
+   UNION/INTERSECT/EXCEPT), produce a single merged vector. For each column
+   position, use the first result (across all cores) that successfully inferred
+   a column name. This handles cases where the first SELECT has a NULL literal
+   or other non-inferable expression but a subsequent SELECT has a real column."
+  [col-vectors]
+  (if (= 1 (count col-vectors))
+    (first col-vectors)
+    (let [n (count (first col-vectors))]
+      (mapv (fn [i]
+              (or (first (keep (fn [cols]
+                                 (let [col (get cols i)]
+                                   (when (:column col) col)))
+                               col-vectors))
+                  (get (first col-vectors) i)))
+            (range n)))))
+
 (defn infer-columns
   "Given a SQL SELECT query string, parse it and infer the column-to-table mapping
-   for each result set column. Handles UNION/INTERSECT/EXCEPT by using the first
-   SELECT's columns, and resolves subqueries in FROM clauses.
+   for each result set column. Handles UNION/INTERSECT/EXCEPT by merging inferred
+   columns across all SELECT branches — for each column position, uses the first
+   branch that can infer a type. Resolves subqueries in FROM clauses.
 
    Returns a vector of maps, one per result column in the SELECT clause. Each map
    contains:
@@ -361,6 +380,6 @@
         stmt (or (find-child (find-child (find-child tree :sql_stmt_list) :sql_stmt)
                              :select_stmt)
                  (throw (ex-info "Not a SELECT statement" {:sql sql})))
-        ;; For UNION/INTERSECT/EXCEPT, use the first select_core
-        core (find-child stmt :select_core)]
-    (infer-select-core core)))
+        cores (find-children stmt :select_core)
+        col-vectors (mapv infer-select-core cores)]
+    (merge-union-columns col-vectors)))

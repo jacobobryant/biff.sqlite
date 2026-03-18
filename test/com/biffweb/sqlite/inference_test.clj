@@ -325,11 +325,11 @@
            (inf/infer-columns "SELECT total_changes() FROM user")))))
 
 (deftest union-test
-  (testing "UNION uses first select_core's columns"
+  (testing "UNION uses first select_core's columns when inferable"
     (is (= [{:column "name" :possible-tables #{"user"}}]
            (inf/infer-columns "SELECT name FROM user UNION SELECT email FROM user"))))
 
-  (testing "UNION ALL uses first select_core's columns"
+  (testing "UNION ALL uses first select_core's columns when inferable"
     (is (= [{:column "name" :possible-tables #{"user"}}
             {:column "age" :possible-tables #{"user"}}]
            (inf/infer-columns "SELECT name, age FROM user UNION ALL SELECT email, id FROM auth_code"))))
@@ -344,7 +344,34 @@
 
   (testing "multiple UNION uses first select_core's columns"
     (is (= [{:column "name" :possible-tables #{"user"}}]
-           (inf/infer-columns "SELECT name FROM user UNION SELECT name FROM pet UNION SELECT name FROM account")))))
+           (inf/infer-columns "SELECT name FROM user UNION SELECT name FROM pet UNION SELECT name FROM account"))))
+
+  (testing "UNION falls back to second query when first has NULL"
+    (is (= [{:column "name" :possible-tables #{"user"}}]
+           (inf/infer-columns "SELECT NULL FROM pet UNION SELECT name FROM user"))))
+
+  (testing "UNION merges columns across queries — first col from second, second col from first"
+    (is (= [{:column "name" :possible-tables #{"user"}}
+            {:column "age" :possible-tables #{"pet"}}]
+           (inf/infer-columns "SELECT NULL, age FROM pet UNION SELECT name, NULL FROM user"))))
+
+  (testing "UNION with three queries fills gaps from later queries"
+    (is (= [{:column "name" :possible-tables #{"user"}}
+            {:column "age" :possible-tables #{"pet"}}
+            {:column "email" :possible-tables #{"account"}}]
+           (inf/infer-columns
+            (str "SELECT NULL, NULL, email FROM account "
+                 "UNION SELECT NULL, age, NULL FROM pet "
+                 "UNION SELECT name, NULL, NULL FROM user")))))
+
+  (testing "UNION with non-inferable expression in first query falls back"
+    (is (= [{:column "name" :possible-tables #{"user"}}
+            {:column nil :possible-tables #{}}]
+           (inf/infer-columns "SELECT count(*), 42 FROM pet UNION SELECT name, count(*) FROM user"))))
+
+  (testing "UNION prefers first query's inference when available"
+    (is (= [{:column "email" :possible-tables #{"pet"}}]
+           (inf/infer-columns "SELECT email FROM pet UNION SELECT name FROM user")))))
 
 (deftest subquery-test
   (testing "subquery with alias resolves to original table"
