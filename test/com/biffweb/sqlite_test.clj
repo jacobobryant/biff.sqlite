@@ -17,7 +17,9 @@
               {:user [:map {:closed true}
                       [:user/id :string]
                       [:user/name :string]
-                      [:user/joined-at inst?]]})})
+                      [:user/joined-at inst?]]
+               ;; Standalone schema key (not in a table :map)
+               :report/latest-join inst?})})
 
 (def ^:dynamic *conn* nil)
 
@@ -31,17 +33,13 @@
 
 (use-fixtures :each with-sqlite)
 
-(deftest inference-fallback-coercion-test
+(deftest direct-column-coercion-test
   (let [ctx {:biff/conn *conn* :biff/malli-opts test-malli-opts}]
     (testing "direct column name matches coercion"
       (is (= [{:user/id "u1" :user/name "Alice" :user/joined-at (Instant/ofEpochMilli 1700000000000)}]
              (biff.sqlite/execute ctx ["SELECT id, name, joined_at FROM user"]))))
 
-    (testing "aliased column falls back to inference"
-      (is (= [{:user/joined-at-alias (Instant/ofEpochMilli 1700000000000)}]
-             (biff.sqlite/execute ctx ["SELECT joined_at AS joined_at_alias FROM user"]))))
-
-    (testing "non-SELECT statement does not fail on inference"
+    (testing "non-SELECT statement does not fail"
       (is (= [{:next.jdbc/update-count 0}]
              (biff.sqlite/execute ctx ["DELETE FROM user WHERE id = ?" "nonexistent"]))))))
 
@@ -175,7 +173,6 @@
         (is (= :item/name (first (keys (first results)))))))
 
     (testing "namespaced alias with coercion applied via malli schema match"
-      ;; :user/joined-at is inst? in our schema, so coercion should apply
       (is (= [{:user/joined-at (Instant/ofEpochMilli 1700000000000)}]
              (biff.sqlite/execute ctx {:select [[:joined-at :user/joined-at]]
                                        :from :user}))))
@@ -194,47 +191,28 @@
     (testing "regular non-namespaced alias gets table-qualified by JDBC"
       (let [results (biff.sqlite/execute ctx {:select [[:name :alias]]
                                               :from :user})]
-        ;; JDBC provides table name for aliased columns from a real table,
-        ;; so as-kebab-maps qualifies the key. Use namespaced aliases to control this.
         (is (= "Alice" (:user/alias (first results))))))))
 
 (deftest namespaced-alias-honeysql-format-test
   (testing "namespaced alias in select is formatted as quoted string"
     (let [input {:select [[:age :user/age-years]] :from :user}
-          ;; The preprocess-honeysql converts :user/age-years to "user/age_years"
-          ;; HoneySQL formats string aliases as quoted identifiers
-          [processed _ _] (#'biff.sqlite/preprocess-honeysql input)
+          processed (update input :select @#'biff.sqlite/preprocess-select)
           sql (first (hsql/format processed))]
       (is (str/includes? sql "\"user/age_years\"")))))
 
-(deftest explicit-column-types-test
+(deftest namespaced-alias-raw-sql-test
   (let [ctx {:biff/conn *conn* :biff/malli-opts test-malli-opts}]
-    (testing "explicit :biff/column-types applies coercion to aliased columns"
-      ;; When aliased from a table column, JDBC provides the table name,
-      ;; so the key is table-qualified by as-kebab-maps
-      (let [results (biff.sqlite/execute ctx {:select [[:joined-at :latest]]
-                                              :from :user
-                                              :biff/column-types {:latest :inst}})]
-        (is (= (Instant/ofEpochMilli 1700000000000) (:user/latest (first results))))))
+    (testing "raw SQL with quoted namespaced alias works"
+      (let [results (biff.sqlite/execute ctx
+                      ["SELECT joined_at AS \"user/joined_at\" FROM user"])]
+        (is (= [{:user/joined-at (Instant/ofEpochMilli 1700000000000)}] results))))))
 
-    (testing "explicit :biff/column-types works with namespaced alias"
-      (let [results (biff.sqlite/execute ctx {:select [[:joined-at :report/latest-join]]
-                                              :from :user
-                                              :biff/column-types {:report/latest-join :inst}})]
-        (is (= [{:report/latest-join (Instant/ofEpochMilli 1700000000000)}] results))))
-
-    (testing "unnamespaced alias with no schema match gets no coercion"
-      ;; JDBC qualifies with table name; :user/raw-ts doesn't match schema
-      (let [results (biff.sqlite/execute ctx {:select [[:joined-at :raw-ts]]
-                                              :from :user})]
-        ;; :user/raw-ts is the key (JDBC provides table name), but it's not
-        ;; in the schema so inference kicks in: infers joined_at -> :inst coercion
-        ;; For truly raw results, use :biff/column-types or namespaced aliases
-        (is (some? (:user/raw-ts (first results))))))
-
-    (testing ":biff/column-types is stripped before HoneySQL formatting"
-      (is (not (str/includes?
-                 (first (hsql/format (first (#'biff.sqlite/preprocess-honeysql
-                                              {:select :* :from :user
-                                               :biff/column-types {:x :inst}}))))
-                 "biff"))))))
+(deftest standalone-schema-key-coercion-test
+  (let [ctx {:biff/conn *conn* :biff/malli-opts test-malli-opts}]
+    (testing "standalone schema key provides coercion for namespaced alias"
+      ;; :report/latest-join is inst? in our schema (top-level, not in a table)
+      (let [results (biff.sqlite/execute ctx
+                      {:select [[:joined-at :report/latest-join]]
+                       :from :user})]
+        (is (= [{:report/latest-join (Instant/ofEpochMilli 1700000000000)}] results))
+        (is (instance? Instant (:report/latest-join (first results)))))))) 
