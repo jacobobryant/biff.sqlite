@@ -3,6 +3,7 @@
    [clojure.string :as str]
    [clojure.test :refer [deftest is testing use-fixtures]]
    [com.biffweb.sqlite :as biff.sqlite]
+   [honey.sql :as hsql]
    [malli.core :as malli]
    [malli.registry :as malr]
    [next.jdbc :as jdbc])
@@ -16,7 +17,9 @@
               {:user [:map {:closed true}
                       [:user/id :string]
                       [:user/name :string]
-                      [:user/joined-at inst?]]})})
+                      [:user/joined-at inst?]]
+               ;; Standalone schema key (not in a table :map)
+               :report/latest-join inst?})})
 
 (def ^:dynamic *conn* nil)
 
@@ -30,17 +33,13 @@
 
 (use-fixtures :each with-sqlite)
 
-(deftest inference-fallback-coercion-test
+(deftest direct-column-coercion-test
   (let [ctx {:biff/conn *conn* :biff/malli-opts test-malli-opts}]
     (testing "direct column name matches coercion"
       (is (= [{:user/id "u1" :user/name "Alice" :user/joined-at (Instant/ofEpochMilli 1700000000000)}]
              (biff.sqlite/execute ctx ["SELECT id, name, joined_at FROM user"]))))
 
-    (testing "aliased column falls back to inference"
-      (is (= [{:user/joined-at-alias (Instant/ofEpochMilli 1700000000000)}]
-             (biff.sqlite/execute ctx ["SELECT joined_at AS joined_at_alias FROM user"]))))
-
-    (testing "non-SELECT statement does not fail on inference"
+    (testing "non-SELECT statement does not fail"
       (is (= [{:next.jdbc/update-count 0}]
              (biff.sqlite/execute ctx ["DELETE FROM user WHERE id = ?" "nonexistent"]))))))
 
@@ -157,3 +156,63 @@
     (let [ctx {:biff/conn *conn* :biff/malli-opts test-malli-opts}]
       (is (= [{:user/id "u1"}]
              (biff.sqlite/execute ctx {:select :id :from :user}))))))
+
+;; --- Namespaced alias tests ---
+
+(deftest namespaced-alias-honeysql-test
+  (let [ctx {:biff/conn *conn* :biff/malli-opts test-malli-opts}]
+    (testing "namespaced alias on column from same table produces correct key"
+      (is (= [{:user/joined-at (Instant/ofEpochMilli 1700000000000)}]
+             (biff.sqlite/execute ctx {:select [[:joined-at :user/joined-at]]
+                                       :from :user}))))
+
+    (testing "namespaced alias on column from different namespace"
+      (let [results (biff.sqlite/execute ctx {:select [[:name :item/name]]
+                                              :from :user})]
+        (is (= [{:item/name "Alice"}] results))
+        (is (= :item/name (first (keys (first results)))))))
+
+    (testing "namespaced alias with coercion applied via malli schema match"
+      (is (= [{:user/joined-at (Instant/ofEpochMilli 1700000000000)}]
+             (biff.sqlite/execute ctx {:select [[:joined-at :user/joined-at]]
+                                       :from :user}))))
+
+    (testing "mix of regular columns and namespaced aliases"
+      (let [results (biff.sqlite/execute ctx {:select [:user/id [:joined-at :user/joined-at]]
+                                              :from :user})]
+        (is (= "u1" (:user/id (first results))))
+        (is (= (Instant/ofEpochMilli 1700000000000) (:user/joined-at (first results))))))
+
+    (testing "namespaced alias on aggregate expression"
+      (let [results (biff.sqlite/execute ctx {:select [[[:count :*] :user/total]]
+                                              :from :user})]
+        (is (= [{:user/total 1}] results))))
+
+    (testing "regular non-namespaced alias gets table-qualified by JDBC"
+      (let [results (biff.sqlite/execute ctx {:select [[:name :alias]]
+                                              :from :user})]
+        (is (= "Alice" (:user/alias (first results))))))))
+
+(deftest namespaced-alias-honeysql-format-test
+  (testing "namespaced alias in select is formatted as quoted string"
+    (let [input {:select [[:age :user/age-years]] :from :user}
+          processed (update input :select @#'biff.sqlite/preprocess-select)
+          sql (first (hsql/format processed))]
+      (is (str/includes? sql "\"user/age_years\"")))))
+
+(deftest namespaced-alias-raw-sql-test
+  (let [ctx {:biff/conn *conn* :biff/malli-opts test-malli-opts}]
+    (testing "raw SQL with quoted namespaced alias works"
+      (let [results (biff.sqlite/execute ctx
+                      ["SELECT joined_at AS \"user/joined_at\" FROM user"])]
+        (is (= [{:user/joined-at (Instant/ofEpochMilli 1700000000000)}] results))))))
+
+(deftest standalone-schema-key-coercion-test
+  (let [ctx {:biff/conn *conn* :biff/malli-opts test-malli-opts}]
+    (testing "standalone schema key provides coercion for namespaced alias"
+      ;; :report/latest-join is inst? in our schema (top-level, not in a table)
+      (let [results (biff.sqlite/execute ctx
+                      {:select [[:joined-at :report/latest-join]]
+                       :from :user})]
+        (is (= [{:report/latest-join (Instant/ofEpochMilli 1700000000000)}] results))
+        (is (instance? Instant (:report/latest-join (first results)))))))) 

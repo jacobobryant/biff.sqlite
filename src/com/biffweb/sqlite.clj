@@ -2,11 +2,11 @@
   "SQLite utilities: schema generation from malli, type coercion, connection pooling.
    Adapted from biff.next/resources/sqlite.clj."
   (:require
+   [camel-snake-kebab.core :as csk]
    [clojure.java.io :as io]
    [clojure.java.process :as process]
    [clojure.string :as str]
    [clojure.tools.logging :as log]
-   [com.biffweb.sqlite.inference :as inference]
    [com.biffweb.sqlite.litestream :as litestream]
    [com.biffweb.sqlite.sqlite3def :as sqlite3def]
    [honey.sql :as hsql]
@@ -18,7 +18,7 @@
   (:import
    [com.zaxxer.hikari HikariConfig HikariDataSource]
    [java.nio ByteBuffer]
-   [java.sql ResultSet]
+   [java.sql ResultSet ResultSetMetaData]
    [java.time Instant]
    [java.util UUID]))
 
@@ -257,6 +257,30 @@
                             read))))
         info))
 
+(defn- standalone-read-coercions
+  "Build read coercions from standalone (non-table) schema keys.
+   e.g. {:report/latest-join inst?} produces coercion for 'report.latest_join'.
+   Allows namespaced aliases to be coerced without being in a table :map schema.
+   Skips keys that already have coercions from table schemas (to avoid conflicts)."
+  [malli-opts info]
+  (let [table-coercion-keys (->> info
+                                  (mapcat (fn [[table-key attrs]]
+                                            (map first attrs)))
+                                  set)]
+    (into {}
+          (mapcat (fn [schema-k]
+                    (when (and (qualified-keyword? schema-k)
+                               (not (contains? table-coercion-keys schema-k)))
+                      (when-let [ast (deref-ast schema-k malli-opts)]
+                        (when-not (= :map (:type ast))
+                          (when-let [coerce-type (infer-coercion-type ast)]
+                            (when-let [read-fn (get-coerce-read-fn coerce-type)]
+                              (let [tbl (str/replace (namespace schema-k) "-" "_")
+                                    col (str/replace (name schema-k) "-" "_")]
+                                [[(str tbl "." col) read-fn]
+                                 [col read-fn]]))))))))
+          (keys (malr/schemas (:registry malli-opts))))))
+
 (defn build-enum-val->int
   "Build a map from namespaced enum keywords to their integer DB values.
    Enforces that enum values must be namespaced keywords with namespace
@@ -280,26 +304,70 @@
                           attrs)))
         info))
 
+;; ============================================================================
+;; Namespaced Alias Support
+;; ============================================================================
+
+(defn- preprocess-select
+  "Walk a HoneySQL :select clause and encode namespaced keyword aliases
+   as strings. In HoneySQL, a 2-element vector [expr alias] where alias
+   is a namespaced keyword like :user/age would be formatted as
+   'expr AS user.age' (broken). By converting the alias to a string like
+   \"user/age\", HoneySQL formats it as 'expr AS \"user/age\"' (correct)."
+  [select]
+  (if (vector? select)
+    (mapv (fn [item]
+            (if (and (vector? item)
+                     (= 2 (count item))
+                     (keyword? (second item))
+                     (namespace (second item)))
+              (let [kw (second item)]
+                [(first item)
+                 (str/replace (str (namespace kw) "/" (name kw)) "-" "_")])
+              item))
+          select)
+    select))
+
+(defn- smart-column-names
+  "Compute column keywords from ResultSetMetaData with proper handling of
+   namespaced aliases. When a column label contains '/', the parts before
+   and after become the keyword namespace and name respectively. Otherwise
+   the JDBC table name is used as the namespace."
+  [^ResultSetMetaData rsmeta]
+  (mapv (fn [^Integer i]
+          (let [label (.getColumnLabel rsmeta i)]
+            (if-let [slash-idx (str/index-of label "/")]
+              (keyword (csk/->kebab-case-string (subs label 0 slash-idx))
+                       (csk/->kebab-case-string (subs label (inc slash-idx))))
+              (let [table (.getTableName rsmeta i)]
+                (if (and table (not= table ""))
+                  (keyword (csk/->kebab-case-string table)
+                           (csk/->kebab-case-string label))
+                  (keyword (csk/->kebab-case-string label)))))))
+        (range 1 (inc (.getColumnCount rsmeta)))))
+
+(defn- smart-kebab-maps
+  "Builder function that produces kebab-case keyword maps with proper handling
+   of namespaced aliases (column labels containing '/')."
+  [^ResultSet rs _opts]
+  (let [rsmeta (.getMetaData rs)
+        cols (smart-column-names rsmeta)]
+    (rs/->MapResultSetBuilder rs rsmeta cols)))
+
 (defn- make-column-reader
   "Create a column reader fn for rs/builder-adapter that applies read coercions.
    read-coercions is a map from SQL column name (string) to coerce-fn.
-   inferred-columns is an optional vector of inferred column maps from
-   inference/infer-columns, used as a fallback when column name is not found
-   in read-coercions.
-   Prefers table-qualified lookups ('table.column') to avoid collisions when
-   multiple tables have columns with the same unqualified name."
-  [read-coercions inferred-columns]
+   Looks up coercions using the pre-computed column keyword from the builder,
+   checking table-qualified ('table.column') then unqualified ('column') keys."
+  [read-coercions]
   (fn [builder ^ResultSet rs ^Integer i]
-    (let [meta (.getMetaData rs)
-          col-name (.getColumnLabel meta i)
-          table-name (.getTableName meta i)
+    (let [col-kw (nth (:cols builder) (dec i))
           value (.getObject rs i)
-          coerce-fn (or (when (and table-name (not= table-name ""))
-                          (get read-coercions (str table-name "." col-name)))
-                        (get read-coercions col-name)
-                        (when-let [{:keys [column]} (get inferred-columns (dec i))]
-                          (when (and column (not= "*" column))
-                            (get read-coercions column))))
+          coerce-fn (when (namespace col-kw)
+                      (let [tbl (str/replace (namespace col-kw) "-" "_")
+                            col (str/replace (name col-kw) "-" "_")]
+                        (or (get read-coercions (str tbl "." col))
+                            (get read-coercions col))))
           coerced-value (if (and coerce-fn (some? value))
                           (coerce-fn value)
                           value)]
@@ -481,20 +549,15 @@
     (when (not-empty result)
       (log/info result))))
 
-(def ^:private memoized-infer-columns
-  "Memoized version of inference/infer-columns. Returns nil on parse failure
-   instead of throwing."
-  (memoize (fn [sql]
-             (try
-               (inference/infer-columns sql)
-               (catch Exception _
-                 nil)))))
-
 (def ^:private memoized-coercions
-  "Memoized function that constructs read-coercions and enum-val->int from malli-opts."
+  "Memoized function that constructs read-coercions and enum-val->int from malli-opts.
+   Includes coercions from both table schemas and standalone schema keys."
   (memoize (fn [malli-opts]
-             (let [info (schema-info malli-opts)]
-               {:read-coercions (build-all-read-coercions info)
+             (let [info (schema-info malli-opts)
+                   table-coercions (build-all-read-coercions info)
+                   standalone-coercions (standalone-read-coercions malli-opts info)
+                   read-coercions (merge standalone-coercions table-coercions)]
+               {:read-coercions read-coercions
                 :enum-val->int (build-enum-val->int info)}))))
 
 (def ^:private write-lock (Object.))
@@ -508,10 +571,18 @@
    SQL vector. Returns results as qualified kebab-case maps with read coercions
    applied automatically. Write coercions are applied to parameters.
    ctx is the system map, from which :biff/conn and :biff/malli-opts are used.
-   Write statements are executed under a lock to avoid contention."
+   Write statements are executed under a lock to avoid contention.
+
+   Namespaced keyword aliases in :select are automatically encoded as quoted
+   SQL identifiers, so {:select [[:joined-at :user/joined-at]]} works correctly.
+   Coercion is applied automatically when the namespaced alias matches a key in
+   the malli schema (either in a table schema or as a top-level schema key)."
   [ctx input]
   (let [{:biff/keys [conn malli-opts]} ctx
         {:keys [read-coercions enum-val->int]} (memoized-coercions malli-opts)
+        input (if (map? input)
+                (update input :select preprocess-select)
+                input)
         sql-vec (cond
                   (map? input) (hsql/format input)
                   (string? input) [input]
@@ -519,9 +590,8 @@
         sql-vec (if enum-val->int
                   (into [(first sql-vec)] (coerce-params enum-val->int (rest sql-vec)))
                   sql-vec)
-        inferred-columns (memoized-infer-columns (first sql-vec))
-        column-reader (make-column-reader read-coercions inferred-columns)
-        opts {:builder-fn (rs/builder-adapter rs/as-kebab-maps column-reader)}
+        column-reader (make-column-reader read-coercions)
+        opts {:builder-fn (rs/builder-adapter smart-kebab-maps column-reader)}
         run #(jdbc/execute! conn sql-vec opts)]
     (if (write-statement? (first sql-vec))
       (locking write-lock (run))
