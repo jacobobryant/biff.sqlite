@@ -4,22 +4,17 @@
    [clojure.test :refer [deftest is testing use-fixtures]]
    [com.biffweb.sqlite :as biff.sqlite]
    [honey.sql :as hsql]
-   [malli.core :as malli]
-   [malli.registry :as malr]
    [next.jdbc :as jdbc])
   (:import
    [java.time Instant]
    [java.util UUID]))
 
-(def test-malli-opts
-  {:registry (malr/composite-registry
-              (malli/default-schemas)
-              {:user [:map {:closed true}
-                      [:user/id :string]
-                      [:user/name :string]
-                      [:user/joined-at inst?]]
-               ;; Standalone schema key (not in a table :map)
-               :report/latest-join inst?})})
+;; --- Test column definitions ---
+
+(def test-columns
+  [{:id :user/id    :type :text :primary-key true :required true}
+   {:id :user/name  :type :text :required true}
+   {:id :user/joined-at :type :inst :required true}])
 
 (def ^:dynamic *conn* nil)
 
@@ -34,7 +29,7 @@
 (use-fixtures :each with-sqlite)
 
 (deftest direct-column-coercion-test
-  (let [ctx {:biff/conn *conn* :biff/malli-opts test-malli-opts}]
+  (let [ctx {:biff/conn *conn* :biff.sqlite/columns test-columns}]
     (testing "direct column name matches coercion"
       (is (= [{:user/id "u1" :user/name "Alice" :user/joined-at (Instant/ofEpochMilli 1700000000000)}]
              (biff.sqlite/execute ctx ["SELECT id, name, joined_at FROM user"]))))
@@ -47,15 +42,12 @@
 
 (deftest schema-sql-basic-test
   (testing "generates CREATE TABLE with correct types and constraints"
-    (let [opts {:registry (malr/composite-registry
-                           (malli/default-schemas)
-                           {:widget [:map {:closed true}
-                                     [:widget/id :uuid]
-                                     [:widget/label :string]
-                                     [:widget/count :int]
-                                     [:widget/score :double]
-                                     [:widget/active :boolean]]})}
-          sql (biff.sqlite/generate-schema-sql opts)]
+    (let [columns [{:id :widget/id     :type :uuid    :primary-key true :required true}
+                   {:id :widget/label  :type :text    :required true}
+                   {:id :widget/count  :type :int     :required true}
+                   {:id :widget/score  :type :real    :required true}
+                   {:id :widget/active :type :boolean :required true}]
+          sql (biff.sqlite/generate-schema-sql columns)]
       (is (str/includes? sql "CREATE TABLE widget"))
       (is (str/includes? sql "id BLOB PRIMARY KEY NOT NULL"))
       (is (str/includes? sql "label TEXT NOT NULL"))
@@ -66,71 +58,82 @@
 
 (deftest schema-sql-optional-test
   (testing "optional columns omit NOT NULL"
-    (let [opts {:registry (malr/composite-registry
-                           (malli/default-schemas)
-                           {:item [:map {:closed true}
-                                   [:item/id :string]
-                                   [:item/note {:optional true} :string]]})}
-          sql (biff.sqlite/generate-schema-sql opts)]
+    (let [columns [{:id :item/id   :type :text :primary-key true :required true}
+                   {:id :item/note :type :text}]
+          sql (biff.sqlite/generate-schema-sql columns)]
       (is (str/includes? sql "id TEXT PRIMARY KEY NOT NULL"))
       (is (re-find #"note TEXT\b" sql))
       (is (not (str/includes? sql "note TEXT NOT NULL"))))))
 
 (deftest schema-sql-enum-test
   (testing "enum columns get CHECK constraints"
-    (let [opts {:registry (malr/composite-registry
-                           (malli/default-schemas)
-                           {:task [:map {:closed true}
-                                   [:task/id :string]
-                                   [:task/status [:enum
-                                                  :task.status/pending
-                                                  :task.status/done]]]})}
-          sql (biff.sqlite/generate-schema-sql opts)]
+    (let [columns [{:id :task/id     :type :text :primary-key true :required true}
+                   {:id :task/status :type :enum :required true
+                    :enum-values {0 :task.status/pending
+                                  1 :task.status/done}}]
+          sql (biff.sqlite/generate-schema-sql columns)]
       (is (str/includes? sql "status INT NOT NULL CHECK"))
       (is (str/includes? sql "IN (0, 1)")))))
 
 (deftest schema-sql-unique-constraints-test
-  (testing "unique constraints from :biff/unique table property"
-    (let [opts {:registry (malr/composite-registry
-                           (malli/default-schemas)
-                           {:membership [:map {:closed true
-                                              :biff/unique [[:membership/user-id :membership/group-id]]}
-                                         [:membership/id :string]
-                                         [:membership/user-id :string]
-                                         [:membership/group-id :string]]})}
-          sql (biff.sqlite/generate-schema-sql opts)]
+  (testing "unique constraints from :unique-with"
+    (let [columns [{:id :membership/id       :type :text :primary-key true :required true}
+                   {:id :membership/user-id  :type :text :required true
+                    :unique-with [:membership/group-id]}
+                   {:id :membership/group-id :type :text :required true}]
+          sql (biff.sqlite/generate-schema-sql columns)]
       (is (str/includes? sql "UNIQUE(user_id, group_id)")))))
 
-(deftest schema-sql-foreign-key-test
-  (testing "foreign key constraints from :biff/ref property"
-    (let [opts {:registry (malr/composite-registry
-                           (malli/default-schemas)
-                           {:account [:map {:closed true}
-                                      [:account/id :string]]
-                            :post [:map {:closed true}
-                                   [:post/id :string]
-                                   [:post/author-id {:biff/ref :account/id} :string]]})}
-          sql (biff.sqlite/generate-schema-sql opts)]
-      (is (str/includes? sql "FOREIGN KEY(author_id) REFERENCES")))))
+(deftest schema-sql-unique-column-test
+  (testing "unique constraint from :unique true"
+    (let [columns [{:id :user/id    :type :uuid :primary-key true :required true}
+                   {:id :user/email :type :text :unique true :required true}]
+          sql (biff.sqlite/generate-schema-sql columns)]
+      (is (str/includes? sql "UNIQUE(email)")))))
 
+(deftest schema-sql-foreign-key-test
+  (testing "foreign key constraints from :ref"
+    (let [columns [{:id :account/id       :type :text :primary-key true :required true}
+                   {:id :post/id          :type :text :primary-key true :required true}
+                   {:id :post/author-id   :type :text :required true :ref :account/id}]
+          sql (biff.sqlite/generate-schema-sql columns)]
+      (is (str/includes? sql "FOREIGN KEY(author_id) REFERENCES account(id)")))))
+
+(deftest schema-sql-index-test
+  (testing "index generation from :index true"
+    (let [columns [{:id :item/id      :type :uuid :primary-key true :required true}
+                   {:id :item/user-id :type :uuid :required true :index true}]
+          sql (biff.sqlite/generate-schema-sql columns)]
+      (is (str/includes? sql "CREATE INDEX idx_item_user_id ON item(user_id)")))))
+
+(deftest schema-sql-edn-type-test
+  (testing "edn type generates BLOB column"
+    (let [columns [{:id :user/id          :type :uuid :primary-key true :required true}
+                   {:id :user/digest-days :type :edn}]
+          sql (biff.sqlite/generate-schema-sql columns)]
+      (is (str/includes? sql "digest_days BLOB")))))
+
+(deftest schema-sql-topo-sort-test
+  (testing "tables are ordered by foreign key dependencies"
+    (let [columns [{:id :post/id        :type :uuid :primary-key true :required true}
+                   {:id :post/author-id :type :uuid :required true :ref :user/id}
+                   {:id :user/id        :type :uuid :primary-key true :required true}]
+          sql (biff.sqlite/generate-schema-sql columns)]
+      (is (< (str/index-of sql "CREATE TABLE user")
+             (str/index-of sql "CREATE TABLE post"))))))
 
 ;; --- Type coercion tests ---
 
 (deftest coercion-roundtrip-test
   (testing "UUID, Instant, boolean, enum, and nippy coercions roundtrip correctly"
-    (let [opts {:registry (malr/composite-registry
-                           (malli/default-schemas)
-                           {:thing [:map {:closed true}
-                                    [:thing/id :uuid]
-                                    [:thing/active :boolean]
-                                    [:thing/created-at inst?]
-                                    [:thing/tags [:vector :string]]
-                                    [:thing/color [:enum
-                                                   :thing.color/red
-                                                   :thing.color/blue]]]})}
-          info (biff.sqlite/schema-info opts)
-          attrs (get info :thing)
-          {:keys [read write]} (biff.sqlite/build-coercions attrs)
+    (let [columns [{:id :thing/id         :type :uuid    :primary-key true}
+                   {:id :thing/active     :type :boolean}
+                   {:id :thing/created-at :type :inst}
+                   {:id :thing/tags       :type :edn}
+                   {:id :thing/color      :type :enum
+                    :enum-values {0 :thing.color/red
+                                  1 :thing.color/blue}}]
+          {:keys [read write]} (biff.sqlite/build-coercions columns)
           test-uuid (UUID/randomUUID)
           test-inst (Instant/ofEpochMilli 1700000000000)
           test-tags ["a" "b"]]
@@ -141,26 +144,26 @@
       (is (= false ((read :thing/active) ((write :thing/active) false))))
       ;; Instant roundtrip
       (is (= test-inst ((read :thing/created-at) ((write :thing/created-at) test-inst))))
-      ;; Nippy roundtrip
+      ;; Nippy roundtrip (edn type)
       (is (= test-tags ((read :thing/tags) ((write :thing/tags) test-tags))))
       ;; Enum roundtrip
       (is (= :thing.color/red ((read :thing/color) ((write :thing/color) :thing.color/red)))))))
 
 (deftest execute-string-input-test
   (testing "execute accepts a bare SQL string"
-    (let [ctx {:biff/conn *conn* :biff/malli-opts test-malli-opts}]
+    (let [ctx {:biff/conn *conn* :biff.sqlite/columns test-columns}]
       (is (= [{:user/id "u1" :user/name "Alice" :user/joined-at (Instant/ofEpochMilli 1700000000000)}]
              (biff.sqlite/execute ctx "SELECT id, name, joined_at FROM user")))))
 
   (testing "execute accepts a HoneySQL map"
-    (let [ctx {:biff/conn *conn* :biff/malli-opts test-malli-opts}]
+    (let [ctx {:biff/conn *conn* :biff.sqlite/columns test-columns}]
       (is (= [{:user/id "u1"}]
              (biff.sqlite/execute ctx {:select :id :from :user}))))))
 
 ;; --- Namespaced alias tests ---
 
 (deftest namespaced-alias-honeysql-test
-  (let [ctx {:biff/conn *conn* :biff/malli-opts test-malli-opts}]
+  (let [ctx {:biff/conn *conn* :biff.sqlite/columns test-columns}]
     (testing "namespaced alias on column from same table produces correct key"
       (is (= [{:user/joined-at (Instant/ofEpochMilli 1700000000000)}]
              (biff.sqlite/execute ctx {:select [[:joined-at :user/joined-at]]
@@ -172,7 +175,7 @@
         (is (= [{:item/name "Alice"}] results))
         (is (= :item/name (first (keys (first results)))))))
 
-    (testing "namespaced alias with coercion applied via malli schema match"
+    (testing "namespaced alias with coercion applied via column definition match"
       (is (= [{:user/joined-at (Instant/ofEpochMilli 1700000000000)}]
              (biff.sqlite/execute ctx {:select [[:joined-at :user/joined-at]]
                                        :from :user}))))
@@ -201,18 +204,103 @@
       (is (str/includes? sql "\"user/age_years\"")))))
 
 (deftest namespaced-alias-raw-sql-test
-  (let [ctx {:biff/conn *conn* :biff/malli-opts test-malli-opts}]
+  (let [ctx {:biff/conn *conn* :biff.sqlite/columns test-columns}]
     (testing "raw SQL with quoted namespaced alias works"
       (let [results (biff.sqlite/execute ctx
                       ["SELECT joined_at AS \"user/joined_at\" FROM user"])]
         (is (= [{:user/joined-at (Instant/ofEpochMilli 1700000000000)}] results))))))
 
-(deftest standalone-schema-key-coercion-test
-  (let [ctx {:biff/conn *conn* :biff/malli-opts test-malli-opts}]
-    (testing "standalone schema key provides coercion for namespaced alias"
-      ;; :report/latest-join is inst? in our schema (top-level, not in a table)
-      (let [results (biff.sqlite/execute ctx
-                      {:select [[:joined-at :report/latest-join]]
-                       :from :user})]
-        (is (= [{:report/latest-join (Instant/ofEpochMilli 1700000000000)}] results))
-        (is (instance? Instant (:report/latest-join (first results)))))))) 
+;; --- Validation tests ---
+
+(deftest validation-rejects-bad-insert-test
+  (testing "validation rejects INSERT with wrong type"
+    (let [columns [{:id :user/id        :type :text :primary-key true :required true}
+                   {:id :user/name      :type :text :required true}
+                   {:id :user/joined-at :type :inst :required true}]
+          ctx {:biff/conn *conn* :biff.sqlite/columns columns}]
+      (is (thrown-with-msg?
+           clojure.lang.ExceptionInfo #"Validation failed"
+           (biff.sqlite/execute ctx {:insert-into :user
+                                     :values [{:user/id "u2"
+                                               :user/name "Bob"
+                                               :user/joined-at "not-an-inst"}]}))))))
+
+(deftest validation-accepts-good-insert-test
+  (testing "validation accepts INSERT with correct types"
+    (let [columns [{:id :user/id        :type :text :primary-key true :required true}
+                   {:id :user/name      :type :text :required true}
+                   {:id :user/joined-at :type :inst :required true}]
+          ctx {:biff/conn *conn* :biff.sqlite/columns columns}]
+      ;; Should not throw
+      (biff.sqlite/execute ctx {:insert-into :user
+                                :values [{:user/id "u2"
+                                          :user/name "Bob"
+                                          :user/joined-at (Instant/ofEpochMilli 1700000000000)}]}))))
+
+(deftest validation-rejects-bad-update-test
+  (testing "validation rejects UPDATE with wrong type via :set"
+    (let [columns [{:id :user/id        :type :text :primary-key true :required true}
+                   {:id :user/name      :type :text :required true}
+                   {:id :user/joined-at :type :inst :required true}]
+          ctx {:biff/conn *conn* :biff.sqlite/columns columns}]
+      (is (thrown-with-msg?
+           clojure.lang.ExceptionInfo #"Validation failed"
+           (biff.sqlite/execute ctx {:update :user
+                                     :set {:user/joined-at "not-an-inst"}
+                                     :where [:= :user/id "u1"]}))))))
+
+(deftest validation-skips-non-literal-values-test
+  (testing "validation skips maps and non-lift vectors"
+    (let [columns [{:id :user/id        :type :text :primary-key true :required true}
+                   {:id :user/name      :type :text :required true}
+                   {:id :user/joined-at :type :inst :required true}]
+          ctx {:biff/conn *conn* :biff.sqlite/columns columns}]
+      ;; vector values (not [:lift ...]) should be skipped - no validation exception
+      (biff.sqlite/execute ctx {:update :user
+                                :set {:user/name [:|| :user/name " Jr."]}
+                                :where [:= :user/id "u1"]}))))
+
+(deftest validation-with-custom-schema-test
+  (testing "custom :schema on column is validated"
+    (let [columns [{:id :user/id        :type :text :primary-key true :required true}
+                   {:id :user/name      :type :text :required true
+                    :schema [:re #"^[A-Z].*"]}
+                   {:id :user/joined-at :type :inst :required true}]
+          ctx {:biff/conn *conn* :biff.sqlite/columns columns}]
+      ;; lowercase name should fail validation
+      (is (thrown-with-msg?
+           clojure.lang.ExceptionInfo #"Validation failed"
+           (biff.sqlite/execute ctx {:insert-into :user
+                                     :values [{:user/id "u3"
+                                               :user/name "lowercase"
+                                               :user/joined-at (Instant/ofEpochMilli 1700000000000)}]})))
+      ;; uppercase name should pass
+      (biff.sqlite/execute ctx {:insert-into :user
+                                :values [{:user/id "u3"
+                                          :user/name "Uppercase"
+                                          :user/joined-at (Instant/ofEpochMilli 1700000000000)}]}))))
+
+(deftest validation-lift-test
+  (testing "[:lift value] is treated as a literal and validated"
+    (let [columns [{:id :user/id        :type :text :primary-key true :required true}
+                   {:id :user/name      :type :text :required true}
+                   {:id :user/joined-at :type :inst :required true}]
+          ctx {:biff/conn *conn* :biff.sqlite/columns columns}]
+      (is (thrown-with-msg?
+           clojure.lang.ExceptionInfo #"Validation failed"
+           (biff.sqlite/execute ctx {:update :user
+                                     :set {:user/joined-at [:lift "not-an-inst"]}
+                                     :where [:= :user/id "u1"]}))))))
+
+(deftest validation-nullable-column-test
+  (testing "nullable column accepts nil in validation"
+    (let [;; Create a table with a nullable column
+          _ (jdbc/execute! *conn* ["CREATE TABLE item (id TEXT PRIMARY KEY, note TEXT) STRICT"])
+          _ (jdbc/execute! *conn* ["INSERT INTO item (id, note) VALUES (?, ?)" "i1" "hello"])
+          columns [{:id :item/id   :type :text :primary-key true :required true}
+                   {:id :item/note :type :text}]
+          ctx {:biff/conn *conn* :biff.sqlite/columns columns}]
+      ;; nil should be valid for a non-required column
+      (biff.sqlite/execute ctx {:update :item
+                                :set {:item/note nil}
+                                :where [:= :item/id "i1"]}))))
