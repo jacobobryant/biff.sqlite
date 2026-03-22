@@ -48,12 +48,8 @@
   [read-coercions]
   (fn [builder ^ResultSet rs ^Integer i]
     (let [col-kw (nth (:cols builder) (dec i))
+          coerce-fn (get read-coercions col-kw)
           value (.getObject rs i)
-          coerce-fn (when (namespace col-kw)
-                      (let [tbl (str/replace (namespace col-kw) "-" "_")
-                            col (str/replace (name col-kw) "-" "_")]
-                        (or (get read-coercions (str tbl "." col))
-                            (get read-coercions col))))
           coerced-value (if (and coerce-fn (some? value))
                           (coerce-fn value)
                           value)]

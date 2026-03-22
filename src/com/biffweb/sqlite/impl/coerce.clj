@@ -18,7 +18,9 @@
 
 (defn int->bool [n]
   (when (some? n)
-    (case n 0 false 1 true
+    (case n
+      0 false
+      1 true
       (throw (ex-info "Invalid boolean value, expected 0 or 1" {:value n})))))
 
 (defn make-enum-reader [enum-map]
@@ -42,71 +44,30 @@
 (defn bool->int [b]
   (if b 1 0))
 
-(defn make-enum-writer [enum-map]
-  (let [reverse-map (into {} (map (fn [[k v]] [v k]) enum-map))]
-    (fn [clj-val]
-      (when (some? clj-val)
-        (or (get reverse-map clj-val)
-            (throw (ex-info "Unknown enum value for write"
-                            {:value clj-val :available-values reverse-map})))))))
-
 ;; --- Coercion dispatch ---
 
-(def ^:private read-fns
-  {:uuid  bytes->uuid
-   :bool  int->bool
-   :inst  epoch-ms->inst
-   :nippy nippy/fast-thaw})
-
-(def ^:private write-fns
-  {:uuid  uuid->bytes
-   :bool  bool->int
-   :inst  inst->epoch-ms
-   :nippy nippy/fast-freeze})
-
-(defn- coercion-type [col]
-  (case (:type col)
-    :uuid    :uuid
-    :boolean :bool
-    :inst    :inst
-    :edn     :nippy
-    :enum    {:enum (:enum-values col)}
-    nil))
-
-(defn- resolve-fn [registry ct]
-  (if (keyword? ct)
-    (get registry ct)
-    (when-let [enum-map (:enum ct)]
-      (if (= registry read-fns)
-        (make-enum-reader enum-map)
-        (make-enum-writer enum-map)))))
-
-(defn build-coercions
-  "Build coercion maps from column definitions.
-   Returns {:read {col-id coerce-fn} :write {col-id coerce-fn}}"
-  [columns]
-  (reduce
-   (fn [acc col]
-     (if-let [ct (coercion-type col)]
-       (cond-> acc
-         (resolve-fn read-fns ct)  (assoc-in [:read (:id col)] (resolve-fn read-fns ct))
-         (resolve-fn write-fns ct) (assoc-in [:write (:id col)] (resolve-fn write-fns ct)))
-       acc))
-   {:read {} :write {}}
-   columns))
+(defn thaw
+  "Temporary until Yakread's data is migrated to fast-freeze"
+  [bytes*]
+  (if (= [78 80 89] (take 3 bytes*))
+    (nippy/thaw bytes*)
+    (nippy/fast-thaw bytes*)))
 
 (defn build-all-read-coercions
   "Build read coercions indexed by SQL column name strings.
    Includes both 'table.column' and 'column' entries."
   [columns]
-  (let [{:keys [read]} (build-coercions columns)]
-    (into {}
-          (mapcat (fn [[col-id coerce-fn]]
-                    (let [tbl (str/replace (str (namespace col-id)) "-" "_")
-                          col (str/replace (name col-id) "-" "_")]
-                      [[(str tbl "." col) coerce-fn]
-                       [col coerce-fn]])))
-          read)))
+  (into {}
+        (keep (fn [{:keys [id enum-values] column-type :type}]
+                (when-some [coerce-fn (case column-type
+                                        :uuid bytes->uuid
+                                        :inst epoch-ms->inst
+                                        :boolean int->bool
+                                        :enum (make-enum-reader enum-values)
+                                        :edn thaw
+                                        nil)]
+                  [id coerce-fn])))
+        columns))
 
 (defn build-enum-val->int
   "Build a map from namespaced enum keywords to their integer DB values."
@@ -132,7 +93,6 @@
   [enum-val->int params]
   (mapv (fn [v]
           (cond
-            (nil? v)     v
             (uuid? v)    (uuid->bytes v)
             (inst? v)    (inst->epoch-ms v)
             (boolean? v) (bool->int v)
@@ -143,6 +103,7 @@
                                             :available (keys enum-val->int)})))
             (map? v)     (nippy/fast-freeze v)
             (vector? v)  (nippy/fast-freeze v)
+            (list? v)    (nippy/fast-freeze v)
             (set? v)     (nippy/fast-freeze v)
             :else        v))
         params))
