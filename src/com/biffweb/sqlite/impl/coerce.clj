@@ -112,7 +112,7 @@
 
 (def memoized-coercions
   "Memoized function that builds coercion data from a columns map.
-   Returns {:builder-fn ... :enum-val->int ...}."
+   Returns {:builder-fn ... :enum-val->int ... :normalized-columns ...}."
   (memoize
    (fn [columns]
      (let [cols (util/normalize-columns columns)
@@ -120,4 +120,5 @@
            column-reader (query/make-column-reader read-coercions)
            enum-val->int (build-enum-val->int cols)]
        {:builder-fn (rs/builder-adapter query/smart-kebab-maps column-reader)
-        :enum-val->int enum-val->int}))))
+        :enum-val->int enum-val->int
+        :normalized-columns cols}))))

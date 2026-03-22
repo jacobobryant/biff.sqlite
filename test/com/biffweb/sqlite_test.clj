@@ -53,7 +53,7 @@
                    :widget/count  {:type :int     :required true}
                    :widget/score  {:type :real    :required true}
                    :widget/active {:type :boolean :required true}}
-          sql (schema/generate-schema-sql (util/normalize-columns columns))]
+          sql (schema/generate-schema-sql (util/normalize-columns columns) [])]
       (is (str/includes? sql "CREATE TABLE widget"))
       (is (str/includes? sql "id BLOB PRIMARY KEY NOT NULL"))
       (is (str/includes? sql "label TEXT NOT NULL"))
@@ -66,7 +66,7 @@
   (testing "optional columns omit NOT NULL"
     (let [columns {:item/id   {:type :text :primary-key true}
                    :item/note {:type :text}}
-          sql (schema/generate-schema-sql (util/normalize-columns columns))]
+          sql (schema/generate-schema-sql (util/normalize-columns columns) [])]
       (is (str/includes? sql "id TEXT PRIMARY KEY NOT NULL"))
       (is (re-find #"note TEXT\b" sql))
       (is (not (str/includes? sql "note TEXT NOT NULL"))))))
@@ -77,7 +77,7 @@
                    :task/status {:type :enum :required true
                                  :enum-values {0 :task.status/pending
                                                1 :task.status/done}}}
-          sql (schema/generate-schema-sql (util/normalize-columns columns))]
+          sql (schema/generate-schema-sql (util/normalize-columns columns) [])]
       (is (str/includes? sql "status INT NOT NULL CHECK"))
       (is (str/includes? sql "IN (0, 1)")))))
 
@@ -87,14 +87,14 @@
                    :membership/user-id  {:type :text :required true
                                          :unique-with [:membership/group-id]}
                    :membership/group-id {:type :text :required true}}
-          sql (schema/generate-schema-sql (util/normalize-columns columns))]
+          sql (schema/generate-schema-sql (util/normalize-columns columns) [])]
       (is (str/includes? sql "UNIQUE(user_id, group_id)")))))
 
 (deftest schema-sql-unique-column-test
   (testing "unique constraint from :unique true"
     (let [columns {:user/id    {:type :uuid :primary-key true}
                    :user/email {:type :text :unique true :required true}}
-          sql (schema/generate-schema-sql (util/normalize-columns columns))]
+          sql (schema/generate-schema-sql (util/normalize-columns columns) [])]
       (is (str/includes? sql "UNIQUE(email)")))))
 
 (deftest schema-sql-foreign-key-test
@@ -102,21 +102,21 @@
     (let [columns {:account/id     {:type :text :primary-key true}
                    :post/id        {:type :text :primary-key true}
                    :post/author-id {:type :text :required true :ref :account/id}}
-          sql (schema/generate-schema-sql (util/normalize-columns columns))]
+          sql (schema/generate-schema-sql (util/normalize-columns columns) [])]
       (is (str/includes? sql "FOREIGN KEY(author_id) REFERENCES account(id)")))))
 
 (deftest schema-sql-index-test
   (testing "index generation from :index true"
     (let [columns {:item/id      {:type :uuid :primary-key true}
                    :item/user-id {:type :uuid :required true :index true}}
-          sql (schema/generate-schema-sql (util/normalize-columns columns))]
+          sql (schema/generate-schema-sql (util/normalize-columns columns) [])]
       (is (str/includes? sql "CREATE INDEX idx_item_user_id ON item(user_id)")))))
 
 (deftest schema-sql-edn-type-test
   (testing "edn type generates BLOB column"
     (let [columns {:user/id          {:type :uuid :primary-key true}
                    :user/digest-days {:type :edn}}
-          sql (schema/generate-schema-sql (util/normalize-columns columns))]
+          sql (schema/generate-schema-sql (util/normalize-columns columns) [])]
       (is (str/includes? sql "digest_days BLOB")))))
 
 (deftest schema-sql-topo-sort-test
@@ -124,14 +124,14 @@
     (let [columns {:post/id        {:type :uuid :primary-key true}
                    :post/author-id {:type :uuid :required true :ref :user/id}
                    :user/id        {:type :uuid :primary-key true}}
-          sql (schema/generate-schema-sql (util/normalize-columns columns))]
+          sql (schema/generate-schema-sql (util/normalize-columns columns) [])]
       (is (< (str/index-of sql "CREATE TABLE user")
              (str/index-of sql "CREATE TABLE post"))))))
 
 (deftest primary-key-implies-required-test
   (testing ":primary-key true implies :required true in schema output"
     (let [columns {:item/id {:type :uuid :primary-key true}}
-          sql (schema/generate-schema-sql (util/normalize-columns columns))]
+          sql (schema/generate-schema-sql (util/normalize-columns columns) [])]
       (is (str/includes? sql "id BLOB PRIMARY KEY NOT NULL")))))
 
 ;; --- Type coercion tests ---

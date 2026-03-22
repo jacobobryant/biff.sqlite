@@ -28,12 +28,8 @@
    and optional :biff.sqlite/extra-sql (vector of SQL strings).
    Returns the full SQL string."
   [{:biff.sqlite/keys [columns extra-sql]}]
-  (let [cols (util/normalize-columns (or columns {}))
-        schema-sql (schema/generate-schema-sql cols)]
-    (str "-- Auto-generated; do not edit.\n\n"
-         schema-sql
-         (when (seq extra-sql)
-           (str "\n\n" (str/join "\n" extra-sql))))))
+  (schema/generate-schema-sql (util/normalize-columns (or columns {}))
+                              (or extra-sql [])))
 
 (defn execute
   "Execute a SQL query/statement. Input can be a HoneySQL map, a raw SQL string,
@@ -51,8 +47,8 @@
   [ctx input]
   (let [{:biff.sqlite/keys [columns read-pool write-conn]} ctx
         columns (or columns {})
-        {:keys [builder-fn enum-val->int]} (coerce/memoized-coercions columns)
-        _ (validate/validate-honeysql-input! (util/normalize-columns columns) input)
+        {:keys [builder-fn enum-val->int normalized-columns]} (coerce/memoized-coercions columns)
+        _ (validate/validate-honeysql-input! normalized-columns input)
         input (if (and (map? input) (:select input))
                 (update input :select query/preprocess-select)
                 input)

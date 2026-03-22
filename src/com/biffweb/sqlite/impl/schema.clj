@@ -92,8 +92,8 @@
                                       [k (apply disj v ready)])))
                          remaining))))))))
 
-(defn generate-schema-sql
-  "Generate the complete schema SQL from column definitions (internal vector format)."
+(defn- generate-ddl
+  "Generate CREATE TABLE and CREATE INDEX DDL from column definitions (internal vector format)."
   [columns]
   (let [grouped (group-by (comp util/col-table :id) columns)
         table-order (topo-sort-tables grouped)
@@ -105,17 +105,23 @@
     (str/join "\n\n"
               (concat create-tables all-indexes))))
 
+(defn generate-schema-sql
+  "Generate the complete schema SQL string from normalized column definitions and extra SQL.
+   Returns the full string including header comment, DDL, and any extra SQL statements."
+  [columns extra-sql]
+  (let [ddl (generate-ddl columns)]
+    (str "-- Auto-generated; do not edit.\n\n"
+         ddl
+         (when (seq extra-sql)
+           (str "\n\n" (str/join "\n" extra-sql))))))
+
 (defn apply-schema!
   "Generate schema SQL from column definitions, write to schema-path,
    and run sqlite3def to apply migrations."
   [db-path schema-path columns extra-sql sqlite3def-path]
   (io/make-parents db-path)
   (io/make-parents schema-path)
-  (let [schema-sql (generate-schema-sql columns)
-        full-sql (str "-- Auto-generated; do not edit.\n\n"
-                      schema-sql
-                      (when (seq extra-sql)
-                        (str "\n\n" (str/join "\n" extra-sql))))
+  (let [full-sql (generate-schema-sql columns extra-sql)
         _ (spit schema-path full-sql)
         result (process/exec sqlite3def-path db-path "--apply" "-f" schema-path)]
     (when (not-empty result)
