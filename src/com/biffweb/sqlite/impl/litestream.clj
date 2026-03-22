@@ -1,4 +1,4 @@
-(ns com.biffweb.sqlite.litestream
+(ns com.biffweb.sqlite.impl.litestream
   "Litestream integration for continuous SQLite replication to S3.
    Downloads litestream binary automatically and runs it as a subprocess.
    Adapted from budgetswu.lib.litestream."

@@ -1,4 +1,4 @@
-(ns com.biffweb.sqlite.sqlite3def
+(ns com.biffweb.sqlite.impl.sqlite3def
   "Auto-installation of sqlite3def for schema migrations.
    Downloads the sqlite3def binary automatically and makes it available
    for apply-schema!. Modeled after the litestream auto-install logic."

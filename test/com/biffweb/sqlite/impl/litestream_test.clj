@@ -1,8 +1,8 @@
-(ns com.biffweb.sqlite.litestream-test
+(ns com.biffweb.sqlite.impl.litestream-test
   (:require [clojure.test :refer [deftest is testing]]
             [clojure.java.io :as io]
             [clojure.string :as str]
-            [com.biffweb.sqlite.litestream :as litestream]))
+            [com.biffweb.sqlite.impl.litestream :as litestream]))
 
 (deftest default-version-test
   (testing "has a default version set"
