@@ -3,6 +3,9 @@
    [clojure.string :as str]
    [clojure.test :refer [deftest is testing use-fixtures]]
    [com.biffweb.sqlite :as biff.sqlite]
+   [com.biffweb.sqlite.impl.coerce :as coerce]
+   [com.biffweb.sqlite.impl.query :as query]
+   [com.biffweb.sqlite.impl.schema :as schema]
    [honey.sql :as hsql]
    [next.jdbc :as jdbc])
   (:import
@@ -47,7 +50,7 @@
                    {:id :widget/count  :type :int     :required true}
                    {:id :widget/score  :type :real    :required true}
                    {:id :widget/active :type :boolean :required true}]
-          sql (biff.sqlite/generate-schema-sql columns)]
+          sql (schema/generate-schema-sql columns)]
       (is (str/includes? sql "CREATE TABLE widget"))
       (is (str/includes? sql "id BLOB PRIMARY KEY NOT NULL"))
       (is (str/includes? sql "label TEXT NOT NULL"))
@@ -60,7 +63,7 @@
   (testing "optional columns omit NOT NULL"
     (let [columns [{:id :item/id   :type :text :primary-key true :required true}
                    {:id :item/note :type :text}]
-          sql (biff.sqlite/generate-schema-sql columns)]
+          sql (schema/generate-schema-sql columns)]
       (is (str/includes? sql "id TEXT PRIMARY KEY NOT NULL"))
       (is (re-find #"note TEXT\b" sql))
       (is (not (str/includes? sql "note TEXT NOT NULL"))))))
@@ -71,7 +74,7 @@
                    {:id :task/status :type :enum :required true
                     :enum-values {0 :task.status/pending
                                   1 :task.status/done}}]
-          sql (biff.sqlite/generate-schema-sql columns)]
+          sql (schema/generate-schema-sql columns)]
       (is (str/includes? sql "status INT NOT NULL CHECK"))
       (is (str/includes? sql "IN (0, 1)")))))
 
@@ -81,14 +84,14 @@
                    {:id :membership/user-id  :type :text :required true
                     :unique-with [:membership/group-id]}
                    {:id :membership/group-id :type :text :required true}]
-          sql (biff.sqlite/generate-schema-sql columns)]
+          sql (schema/generate-schema-sql columns)]
       (is (str/includes? sql "UNIQUE(user_id, group_id)")))))
 
 (deftest schema-sql-unique-column-test
   (testing "unique constraint from :unique true"
     (let [columns [{:id :user/id    :type :uuid :primary-key true :required true}
                    {:id :user/email :type :text :unique true :required true}]
-          sql (biff.sqlite/generate-schema-sql columns)]
+          sql (schema/generate-schema-sql columns)]
       (is (str/includes? sql "UNIQUE(email)")))))
 
 (deftest schema-sql-foreign-key-test
@@ -96,21 +99,21 @@
     (let [columns [{:id :account/id       :type :text :primary-key true :required true}
                    {:id :post/id          :type :text :primary-key true :required true}
                    {:id :post/author-id   :type :text :required true :ref :account/id}]
-          sql (biff.sqlite/generate-schema-sql columns)]
+          sql (schema/generate-schema-sql columns)]
       (is (str/includes? sql "FOREIGN KEY(author_id) REFERENCES account(id)")))))
 
 (deftest schema-sql-index-test
   (testing "index generation from :index true"
     (let [columns [{:id :item/id      :type :uuid :primary-key true :required true}
                    {:id :item/user-id :type :uuid :required true :index true}]
-          sql (biff.sqlite/generate-schema-sql columns)]
+          sql (schema/generate-schema-sql columns)]
       (is (str/includes? sql "CREATE INDEX idx_item_user_id ON item(user_id)")))))
 
 (deftest schema-sql-edn-type-test
   (testing "edn type generates BLOB column"
     (let [columns [{:id :user/id          :type :uuid :primary-key true :required true}
                    {:id :user/digest-days :type :edn}]
-          sql (biff.sqlite/generate-schema-sql columns)]
+          sql (schema/generate-schema-sql columns)]
       (is (str/includes? sql "digest_days BLOB")))))
 
 (deftest schema-sql-topo-sort-test
@@ -118,7 +121,7 @@
     (let [columns [{:id :post/id        :type :uuid :primary-key true :required true}
                    {:id :post/author-id :type :uuid :required true :ref :user/id}
                    {:id :user/id        :type :uuid :primary-key true :required true}]
-          sql (biff.sqlite/generate-schema-sql columns)]
+          sql (schema/generate-schema-sql columns)]
       (is (< (str/index-of sql "CREATE TABLE user")
              (str/index-of sql "CREATE TABLE post"))))))
 
@@ -133,7 +136,7 @@
                    {:id :thing/color      :type :enum
                     :enum-values {0 :thing.color/red
                                   1 :thing.color/blue}}]
-          {:keys [read write]} (biff.sqlite/build-coercions columns)
+          {:keys [read write]} (coerce/build-coercions columns)
           test-uuid (UUID/randomUUID)
           test-inst (Instant/ofEpochMilli 1700000000000)
           test-tags ["a" "b"]]
@@ -199,7 +202,7 @@
 (deftest namespaced-alias-honeysql-format-test
   (testing "namespaced alias in select is formatted as quoted string"
     (let [input {:select [[:age :user/age-years]] :from :user}
-          processed (update input :select @#'biff.sqlite/preprocess-select)
+          processed (update input :select query/preprocess-select)
           sql (first (hsql/format processed))]
       (is (str/includes? sql "\"user/age_years\"")))))
 

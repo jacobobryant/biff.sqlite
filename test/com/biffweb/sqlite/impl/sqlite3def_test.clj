@@ -1,8 +1,8 @@
-(ns com.biffweb.sqlite.sqlite3def-test
+(ns com.biffweb.sqlite.impl.sqlite3def-test
   (:require [clojure.test :refer [deftest is testing]]
             [clojure.java.io :as io]
             [clojure.string :as str]
-            [com.biffweb.sqlite.sqlite3def :as sqlite3def]))
+            [com.biffweb.sqlite.impl.sqlite3def :as sqlite3def]))
 
 (deftest default-version-test
   (testing "has a default version set"
