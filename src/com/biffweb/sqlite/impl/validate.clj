@@ -11,8 +11,7 @@
     :inst    inst?
     :uuid    :uuid
     :edn     [:or map? set? vector? list?]
-    :enum    (into [:enum] (vals (:enum-values col)))
-    :string  :string))
+    :enum    (into [:enum] (vals (:enum-values col)))))
 
 (defn- validation-schema [col]
   (let [base (default-schema col)

@@ -13,51 +13,52 @@ io.github.jacobobryant/biff.sqlite {:git/tag "..." :git/sha "..."}
 ## Quick Start
 
 ```clojure
-(require '[com.biffweb.sqlite :as sqlite])
+(require '[com.biffweb.sqlite :as biff.sqlite])
 
-;; Define your columns
+;; Define your columns as a map of column-id → properties
 (def columns
-  [{:id :user/id         :type :uuid :primary-key true :required true}
-   {:id :user/email      :type :text :unique true :required true}
-   {:id :user/name       :type :text :required true}
-   {:id :user/joined-at  :type :inst :required true}
-   {:id :user/active     :type :boolean}
-   {:id :user/role       :type :enum :required true
-    :enum-values {0 :user.role/member
-                  1 :user.role/admin}}])
+  {:user/id        {:type :uuid :primary-key true}
+   :user/email     {:type :text :unique true :required true}
+   :user/name      {:type :text :required true}
+   :user/joined-at {:type :inst :required true}
+   :user/active    {:type :boolean}
+   :user/role      {:type :enum :required true
+                    :enum-values {0 :user.role/member
+                                  1 :user.role/admin}}})
 
 ;; Use as a Biff component
 (defn start-system [ctx]
-  (sqlite/use-sqlite
+  (biff.sqlite/use-sqlite
     (assoc ctx
       :biff.sqlite/columns columns
       :biff.sqlite/db-path "storage/sqlite/main.db")))
 
-;; Execute queries
-(sqlite/execute ctx {:select :* :from :user})
+;; Execute queries (uses :biff.sqlite/read-pool for reads)
+(biff.sqlite/execute ctx {:select :* :from :user})
 ;; => [{:user/id #uuid "...", :user/email "alice@example.com", ...}]
 
-(sqlite/execute ctx {:insert-into :user
-                     :values [{:user/id (java.util.UUID/randomUUID)
-                               :user/email "bob@example.com"
-                               :user/name "Bob"
-                               :user/joined-at (java.time.Instant/now)
-                               :user/active true
-                               :user/role :user.role/member}]})
+;; Execute writes (uses :biff.sqlite/write-conn, serialized under a lock)
+(biff.sqlite/execute ctx {:insert-into :user
+                          :values [{:user/id (java.util.UUID/randomUUID)
+                                    :user/email "bob@example.com"
+                                    :user/name "Bob"
+                                    :user/joined-at (java.time.Instant/now)
+                                    :user/active true
+                                    :user/role :user.role/member}]})
 ```
 
 ## Public API
 
 ### `use-sqlite`
 
-Biff component that runs schema migrations (via sqlite3def) and starts a HikariCP connection pool. Adds `:biff/conn` to the system context.
+Biff component that runs schema migrations (via sqlite3def) and starts connections. Adds `:biff.sqlite/read-pool` (HikariCP pool for reads) and `:biff.sqlite/write-conn` (single long-lived connection for writes) to the system context.
 
 **System map keys:**
 
 | Key | Description | Default |
 |-----|-------------|---------|
 | `:biff.sqlite/db-path` | Path to SQLite database file | `"storage/sqlite/main.db"` |
-| `:biff.sqlite/columns` | Vector of column definition maps | `[]` |
+| `:biff.sqlite/columns` | Map of column-id → property map | `{}` |
 | `:biff.sqlite/extra-sql` | Vector of extra SQL strings to append to schema | `[]` |
 | `:biff.sqlite/sqlite3def-version` | sqlite3def version to auto-install | `"3.10.1"` |
 | `:biff.sqlite/litestream-*` | Litestream S3 replication config (see below) | — |
@@ -70,17 +71,38 @@ Execute a SQL query or statement. Accepts:
 - A **raw SQL string**: `"SELECT * FROM user"`
 - A **JDBC vector**: `["SELECT * FROM user WHERE id = ?" "u1"]`
 
-Returns results as qualified kebab-case keyword maps with automatic type coercion. Write statements are serialized under a lock.
+Returns results as qualified kebab-case keyword maps with automatic type coercion. Write statements are executed on the write connection under a lock; reads go through the connection pool.
+
+### `use-litestream`
+
+Biff component for litestream replication. This is called by `use-sqlite` automatically — it's only exposed in case you want to use litestream replication without the full `use-sqlite` component.
+
+### `generate-schema-sql`
+
+Generate the complete schema SQL string from column definitions. Takes a map with `:biff.sqlite/columns` and optional `:biff.sqlite/extra-sql`. Returns the full SQL string including the auto-generated header.
+
+```clojure
+(biff.sqlite/generate-schema-sql
+  {:biff.sqlite/columns columns
+   :biff.sqlite/extra-sql ["CREATE INDEX custom_idx ON user(email);"]})
+```
 
 ## Column Definitions
 
-Each column is a map with these keys:
+Columns are defined as a map from qualified keywords to property maps. The keyword namespace is the table name and the keyword name is the column name.
+
+```clojure
+{:user/id    {:type :uuid :primary-key true}
+ :user/email {:type :text :unique true :required true}
+ :user/name  {:type :text :required true}}
+```
+
+**Column properties:**
 
 | Key | Type | Description |
 |-----|------|-------------|
-| `:id` | keyword | **(required)** Qualified keyword — namespace is the table name, name is the column name |
-| `:type` | keyword | **(required)** One of: `:int`, `:real`, `:text`, `:string`, `:boolean`, `:inst`, `:uuid`, `:enum`, `:edn` |
-| `:primary-key` | boolean | Adds `PRIMARY KEY` constraint |
+| `:type` | keyword | **(required)** One of: `:int`, `:real`, `:text`, `:boolean`, `:inst`, `:uuid`, `:enum`, `:edn` |
+| `:primary-key` | boolean | Adds `PRIMARY KEY` constraint (implies `:required`) |
 | `:required` | boolean | Adds `NOT NULL` constraint |
 | `:unique` | boolean | Adds `UNIQUE` constraint |
 | `:unique-with` | vector | Compound `UNIQUE` constraint with other columns |
@@ -99,8 +121,8 @@ Values are automatically coerced between Clojure and SQLite:
 | `:inst` | `java.time.Instant` | `INT` (epoch millis) |
 | `:boolean` | `true`/`false` | `INT` (0/1) |
 | `:enum` | namespaced keyword | `INT` |
-| `:edn` | any Clojure data | `BLOB` (nippy) |
-| `:text`, `:string` | `String` | `TEXT` |
+| `:edn` | map, vector, list, or set | `BLOB` (nippy) |
+| `:text` | `String` | `TEXT` |
 | `:int` | `long` | `INT` |
 | `:real` | `double` | `REAL` |
 

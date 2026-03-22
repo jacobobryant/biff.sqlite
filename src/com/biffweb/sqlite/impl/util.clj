@@ -33,5 +33,19 @@
     :boolean "INT"
     :inst    "INT"
     :enum    "INT"
-    :edn     "BLOB"
-    :string  "TEXT"))
+    :edn     "BLOB"))
+
+(defn normalize-columns
+  "Convert public map format {kw {:type ...}} to internal vector-of-maps format.
+   Also ensures :primary-key implies :required."
+  [columns]
+  (mapv (fn [[id props]]
+          (cond-> (assoc props :id id)
+            (:primary-key props) (assoc :required true)))
+        columns))
+
+(defn write-statement?
+  "Returns true if the SQL string is a write statement."
+  [sql-str]
+  (let [trimmed (str/triml sql-str)]
+    (boolean (re-find #"(?i)^(INSERT|UPDATE|DELETE|CREATE|DROP|ALTER)\b" trimmed))))

@@ -1,6 +1,8 @@
 (ns com.biffweb.sqlite.impl.coerce
   "Internal type coercion between Clojure values and SQLite storage types."
-  (:require [clojure.string :as str]
+  (:require [com.biffweb.sqlite.impl.query :as query]
+            [com.biffweb.sqlite.impl.util :as util]
+            [next.jdbc.result-set :as rs]
             [taoensso.nippy :as nippy])
   (:import [java.nio ByteBuffer]
            [java.time Instant]
@@ -107,3 +109,15 @@
             (set? v)     (nippy/fast-freeze v)
             :else        v))
         params))
+
+(def memoized-coercions
+  "Memoized function that builds coercion data from a columns map.
+   Returns {:builder-fn ... :enum-val->int ...}."
+  (memoize
+   (fn [columns]
+     (let [cols (util/normalize-columns columns)
+           read-coercions (build-all-read-coercions cols)
+           column-reader (query/make-column-reader read-coercions)
+           enum-val->int (build-enum-val->int cols)]
+       {:builder-fn (rs/builder-adapter query/smart-kebab-maps column-reader)
+        :enum-val->int enum-val->int}))))

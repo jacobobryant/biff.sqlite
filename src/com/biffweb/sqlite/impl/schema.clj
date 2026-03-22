@@ -1,6 +1,9 @@
 (ns com.biffweb.sqlite.impl.schema
   "Internal DDL generation from column definitions."
-  (:require [clojure.string :as str]
+  (:require [clojure.java.io :as io]
+            [clojure.java.process :as process]
+            [clojure.string :as str]
+            [clojure.tools.logging :as log]
             [com.biffweb.sqlite.impl.util :as util]))
 
 (defn- generate-column-def [col]
@@ -90,7 +93,7 @@
                          remaining))))))))
 
 (defn generate-schema-sql
-  "Generate the complete schema SQL from column definitions."
+  "Generate the complete schema SQL from column definitions (internal vector format)."
   [columns]
   (let [grouped (group-by (comp util/col-table :id) columns)
         table-order (topo-sort-tables grouped)
@@ -101,3 +104,19 @@
         all-indexes (mapcat #(generate-indexes (get grouped %)) table-order)]
     (str/join "\n\n"
               (concat create-tables all-indexes))))
+
+(defn apply-schema!
+  "Generate schema SQL from column definitions, write to schema-path,
+   and run sqlite3def to apply migrations."
+  [db-path schema-path columns extra-sql sqlite3def-path]
+  (io/make-parents db-path)
+  (io/make-parents schema-path)
+  (let [schema-sql (generate-schema-sql columns)
+        full-sql (str "-- Auto-generated; do not edit.\n\n"
+                      schema-sql
+                      (when (seq extra-sql)
+                        (str "\n\n" (str/join "\n" extra-sql))))
+        _ (spit schema-path full-sql)
+        result (process/exec sqlite3def-path db-path "--apply" "-f" schema-path)]
+    (when (not-empty result)
+      (log/info result))))
