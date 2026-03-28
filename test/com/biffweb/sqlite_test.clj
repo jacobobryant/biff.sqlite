@@ -348,3 +348,80 @@
       (is (str/includes? result "-- Auto-generated; do not edit."))
       (is (str/includes? result "CREATE TABLE user"))
       (is (str/includes? result "CREATE INDEX custom_idx")))))
+
+;; --- make-resolvers tests ---
+
+(def resolver-columns
+  {:user/id        {:type :text :primary-key true}
+   :user/name      {:type :text :required true}
+   :user/joined-at {:type :inst :required true}
+   :post/id        {:type :text :primary-key true}
+   :post/title     {:type :text :required true}
+   :post/author-id {:type :text :required true :ref :user/id}})
+
+(deftest make-resolvers-shape-test
+  (testing "returns one resolver per table with correct structure"
+    (let [resolvers (biff.sqlite/make-resolvers {:biff.sqlite/columns resolver-columns})
+          by-id (into {} (map (juxt :id identity)) resolvers)]
+      (is (= 2 (count resolvers)))
+      ;; User resolver
+      (let [r (by-id :com.biffweb.sqlite/user-resolver)]
+        (is (some? r))
+        (is (= [:user/id] (:input r)))
+        (is (= true (:batch r)))
+        (is (every? #{:user/name :user/joined-at} (:output r)))
+        (is (not (contains? (set (:output r)) :user/id))))
+      ;; Post resolver
+      (let [r (by-id :com.biffweb.sqlite/post-resolver)]
+        (is (some? r))
+        (is (= [:post/id] (:input r)))
+        (is (= true (:batch r)))
+        (is (contains? (set (:output r)) :post/title))
+        (is (contains? (set (:output r)) :post/author-id))
+        (is (contains? (set (:output r)) :post/author))))))
+
+(deftest make-resolvers-batch-resolve-test
+  (testing "batch resolve returns correct data and join keys"
+    (jdbc/execute! *conn* ["CREATE TABLE post (id TEXT PRIMARY KEY, title TEXT NOT NULL, author_id TEXT NOT NULL, FOREIGN KEY(author_id) REFERENCES user(id)) STRICT"])
+    (jdbc/execute! *conn* ["INSERT INTO post (id, title, author_id) VALUES (?, ?, ?)" "p1" "Hello" "u1"])
+    (jdbc/execute! *conn* ["INSERT INTO post (id, title, author_id) VALUES (?, ?, ?)" "p2" "World" "u1"])
+    (let [ctx {:biff.sqlite/read-pool *conn*
+               :biff.sqlite/write-conn *conn*
+               :biff.sqlite/columns resolver-columns}
+          resolvers (biff.sqlite/make-resolvers ctx)
+          post-resolver (first (filter #(= :com.biffweb.sqlite/post-resolver (:id %)) resolvers))
+          results ((:resolve post-resolver) ctx [{:post/id "p1"} {:post/id "p2"}])]
+      (is (= 2 (count results)))
+      (is (= "Hello" (:post/title (first results))))
+      (is (= "World" (:post/title (second results))))
+      ;; Raw ref column preserved
+      (is (= "u1" (:post/author-id (first results))))
+      ;; Join key added
+      (is (= {:user/id "u1"} (:post/author (first results)))))))
+
+(deftest make-resolvers-missing-entity-test
+  (testing "batch resolve returns empty map for missing entities"
+    (let [ctx {:biff.sqlite/read-pool *conn*
+               :biff.sqlite/write-conn *conn*
+               :biff.sqlite/columns resolver-columns}
+          resolvers (biff.sqlite/make-resolvers ctx)
+          user-resolver (first (filter #(= :com.biffweb.sqlite/user-resolver (:id %)) resolvers))
+          results ((:resolve user-resolver) ctx [{:user/id "u1"} {:user/id "nonexistent"}])]
+      (is (= 2 (count results)))
+      (is (= "Alice" (:user/name (first results))))
+      (is (= {} (second results))))))
+
+(deftest make-resolvers-no-primary-key-test
+  (testing "throws when table has no primary key"
+    (is (thrown-with-msg?
+         clojure.lang.ExceptionInfo #"No primary key"
+         (biff.sqlite/make-resolvers
+          {:biff.sqlite/columns {:broken/name {:type :text}}})))))
+
+(deftest make-resolvers-no-refs-test
+  (testing "tables without ref columns have no extra join keys"
+    (let [resolvers (biff.sqlite/make-resolvers
+                     {:biff.sqlite/columns {:item/id    {:type :text :primary-key true}
+                                            :item/label {:type :text}}})
+          r (first resolvers)]
+      (is (= [:item/label] (:output r))))))
