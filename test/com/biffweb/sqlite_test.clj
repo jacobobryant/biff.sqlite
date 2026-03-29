@@ -348,3 +348,103 @@
       (is (str/includes? result "-- Auto-generated; do not edit."))
       (is (str/includes? result "CREATE TABLE user"))
       (is (str/includes? result "CREATE INDEX custom_idx")))))
+
+;; --- make-resolvers tests ---
+
+(def resolver-columns
+  {:user/id        {:type :text :primary-key true}
+   :user/name      {:type :text :required true}
+   :user/joined-at {:type :inst :required true}
+   :post/id        {:type :text :primary-key true}
+   :post/title     {:type :text :required true}
+   :post/author-id {:type :text :required true :ref :user/id}})
+
+(deftest make-resolvers-shape-test
+  (testing "returns one resolver per table with correct structure"
+    (let [resolvers (biff.sqlite/make-resolvers {:biff.sqlite/columns resolver-columns})
+          by-id (into {} (map (juxt :id identity)) resolvers)]
+      (is (= 2 (count resolvers)))
+      ;; User resolver
+      (let [r (by-id :com.biffweb.sqlite/user-resolver)]
+        (is (some? r))
+        (is (= [:user/id] (:input r)))
+        (is (= true (:batch r)))
+        (is (every? #{:user/name :user/joined-at} (:output r)))
+        (is (not (contains? (set (:output r)) :user/id))))
+      ;; Post resolver
+      (let [r (by-id :com.biffweb.sqlite/post-resolver)]
+        (is (some? r))
+        (is (= [:post/id] (:input r)))
+        (is (= true (:batch r)))
+        (is (contains? (set (:output r)) :post/title))
+        (is (contains? (set (:output r)) :post/author-id))
+        (is (contains? (set (:output r)) :post/author))))))
+
+(deftest make-resolvers-batch-resolve-test
+  (testing "batch resolve returns correct data and join keys"
+    (jdbc/execute! *conn* ["CREATE TABLE post (id TEXT PRIMARY KEY, title TEXT NOT NULL, author_id TEXT NOT NULL, FOREIGN KEY(author_id) REFERENCES user(id)) STRICT"])
+    (jdbc/execute! *conn* ["INSERT INTO post (id, title, author_id) VALUES (?, ?, ?)" "p1" "Hello" "u1"])
+    (jdbc/execute! *conn* ["INSERT INTO post (id, title, author_id) VALUES (?, ?, ?)" "p2" "World" "u1"])
+    (let [ctx {:biff.sqlite/read-pool *conn*
+               :biff.sqlite/write-conn *conn*
+               :biff.sqlite/columns resolver-columns}
+          resolvers (biff.sqlite/make-resolvers ctx)
+          post-resolver (first (filter #(= :com.biffweb.sqlite/post-resolver (:id %)) resolvers))
+          results ((:resolve post-resolver) ctx [{:post/id "p1"} {:post/id "p2"}])]
+      (is (= 2 (count results)))
+      (is (= "Hello" (:post/title (first results))))
+      (is (= "World" (:post/title (second results))))
+      ;; Raw ref column preserved
+      (is (= "u1" (:post/author-id (first results))))
+      ;; Join key added
+      (is (= {:user/id "u1"} (:post/author (first results)))))))
+
+(deftest make-resolvers-missing-entity-test
+  (testing "batch resolve returns empty map for missing entities"
+    (let [ctx {:biff.sqlite/read-pool *conn*
+               :biff.sqlite/write-conn *conn*
+               :biff.sqlite/columns resolver-columns}
+          resolvers (biff.sqlite/make-resolvers ctx)
+          user-resolver (first (filter #(= :com.biffweb.sqlite/user-resolver (:id %)) resolvers))
+          results ((:resolve user-resolver) ctx [{:user/id "u1"} {:user/id "nonexistent"}])]
+      (is (= 2 (count results)))
+      (is (= "Alice" (:user/name (first results))))
+      (is (= {} (second results))))))
+
+(deftest make-resolvers-no-primary-key-test
+  (testing "throws when table has no primary key"
+    (is (thrown-with-msg?
+         clojure.lang.ExceptionInfo #"No primary key"
+         (biff.sqlite/make-resolvers
+          {:biff.sqlite/columns {:broken/name {:type :text}}})))))
+
+(deftest make-resolvers-no-refs-test
+  (testing "tables without ref columns have no extra join keys"
+    (let [resolvers (biff.sqlite/make-resolvers
+                     {:biff.sqlite/columns {:item/id    {:type :text :primary-key true}
+                                            :item/label {:type :text}}})
+          r (first resolvers)]
+      (is (= [:item/label] (:output r))))))
+
+(deftest make-resolvers-nil-values-test
+  (testing "resolver does not return keys with nil values"
+    (jdbc/execute! *conn* ["CREATE TABLE entry (id TEXT PRIMARY KEY, title TEXT, author_id TEXT) STRICT"])
+    (jdbc/execute! *conn* ["INSERT INTO entry (id, title, author_id) VALUES (?, ?, ?)" "e1" nil nil])
+    (jdbc/execute! *conn* ["INSERT INTO entry (id, title, author_id) VALUES (?, ?, ?)" "e2" "Hello" "u1"])
+    (let [cols {:entry/id        {:type :text :primary-key true}
+                :entry/title     {:type :text}
+                :entry/author-id {:type :text :ref :user/id}}
+          ctx {:biff.sqlite/read-pool *conn*
+               :biff.sqlite/write-conn *conn*
+               :biff.sqlite/columns cols}
+          resolvers (biff.sqlite/make-resolvers ctx)
+          r (first resolvers)
+          results ((:resolve r) ctx [{:entry/id "e1"} {:entry/id "e2"}])]
+      ;; e1 has all nil values, so result should have no keys (just empty from id->result)
+      (is (not (contains? (first results) :entry/title)))
+      (is (not (contains? (first results) :entry/author-id)))
+      (is (not (contains? (first results) :entry/author)))
+      ;; e2 has values, so all keys present
+      (is (= "Hello" (:entry/title (second results))))
+      (is (= "u1" (:entry/author-id (second results))))
+      (is (= {:user/id "u1"} (:entry/author (second results)))))))
