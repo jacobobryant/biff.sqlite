@@ -425,3 +425,26 @@
                                             :item/label {:type :text}}})
           r (first resolvers)]
       (is (= [:item/label] (:output r))))))
+
+(deftest make-resolvers-nil-values-test
+  (testing "resolver does not return keys with nil values"
+    (jdbc/execute! *conn* ["CREATE TABLE entry (id TEXT PRIMARY KEY, title TEXT, author_id TEXT) STRICT"])
+    (jdbc/execute! *conn* ["INSERT INTO entry (id, title, author_id) VALUES (?, ?, ?)" "e1" nil nil])
+    (jdbc/execute! *conn* ["INSERT INTO entry (id, title, author_id) VALUES (?, ?, ?)" "e2" "Hello" "u1"])
+    (let [cols {:entry/id        {:type :text :primary-key true}
+                :entry/title     {:type :text}
+                :entry/author-id {:type :text :ref :user/id}}
+          ctx {:biff.sqlite/read-pool *conn*
+               :biff.sqlite/write-conn *conn*
+               :biff.sqlite/columns cols}
+          resolvers (biff.sqlite/make-resolvers ctx)
+          r (first resolvers)
+          results ((:resolve r) ctx [{:entry/id "e1"} {:entry/id "e2"}])]
+      ;; e1 has all nil values, so result should have no keys (just empty from id->result)
+      (is (not (contains? (first results) :entry/title)))
+      (is (not (contains? (first results) :entry/author-id)))
+      (is (not (contains? (first results) :entry/author)))
+      ;; e2 has values, so all keys present
+      (is (= "Hello" (:entry/title (second results))))
+      (is (= "u1" (:entry/author-id (second results))))
+      (is (= {:user/id "u1"} (:entry/author (second results)))))))

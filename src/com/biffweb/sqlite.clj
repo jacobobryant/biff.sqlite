@@ -153,12 +153,13 @@
                                                    (str/ends-with? (name col-key) "-id"))
                                           [col-key (:ref props)])))
                                 non-pk-cols)
-                 ;; Join keys: {join-key ref-target-key}
-                 join-keys (into {}
-                                 (map (fn [[col-key ref-key]]
-                                        [(strip-id-suffix col-key) ref-key]))
-                                 ref-cols)
-                 output (vec (concat (keys non-pk-cols) (keys join-keys)))
+                 ;; Precomputed join mappings: [{:join-key, :col-key, :ref-key}]
+                 join-mappings (mapv (fn [[col-key ref-key]]
+                                      {:join-key (strip-id-suffix col-key)
+                                       :col-key col-key
+                                       :ref-key ref-key})
+                                    ref-cols)
+                 output (vec (concat (keys non-pk-cols) (map :join-key join-mappings)))
                  resolver-id (keyword "com.biffweb.sqlite"
                                       (str (name table-key) "-resolver"))]]
        {:id resolver-id
@@ -171,16 +172,14 @@
                                               :from table-key
                                               :where [:in :id ids]})
                          process-row (fn [row]
-                                       (reduce-kv
-                                        (fn [row join-key ref-key]
-                                          (let [id-col-key (keyword (namespace join-key)
-                                                                    (str (name join-key) "-id"))
-                                                ref-val (get row id-col-key)]
-                                            (assoc row join-key
-                                                   (when (some? ref-val)
-                                                     {ref-key ref-val}))))
-                                        row
-                                        join-keys))
+                                       (let [row (reduce
+                                                  (fn [row {:keys [join-key col-key ref-key]}]
+                                                    (let [ref-val (get row col-key)]
+                                                      (cond-> row
+                                                        (some? ref-val) (assoc join-key {ref-key ref-val}))))
+                                                  row
+                                                  join-mappings)]
+                                         (into {} (filter (fn [[_ v]] (some? v))) row)))
                          results (mapv process-row results)
                          id->result (into {} (map (juxt pk-key identity)) results)]
                      (mapv (fn [input]
