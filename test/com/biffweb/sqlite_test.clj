@@ -134,6 +134,35 @@
           sql (schema/generate-schema-sql (util/normalize-columns columns) [])]
       (is (str/includes? sql "id BLOB PRIMARY KEY NOT NULL")))))
 
+(deftest schema-sql-column-sort-order-test
+  (testing "columns are sorted: primary key first, then required (alpha), then optional (alpha)"
+    (let [columns {:widget/id      {:type :uuid :primary-key true}
+                   :widget/zebra   {:type :text :required true}
+                   :widget/alpha   {:type :text :required true}
+                   :widget/zoptional {:type :text}
+                   :widget/beta    {:type :int}}
+          sql (schema/generate-schema-sql (util/normalize-columns columns) [])
+          id-pos (str/index-of sql "id BLOB PRIMARY KEY")
+          alpha-pos (str/index-of sql "alpha TEXT NOT NULL")
+          zebra-pos (str/index-of sql "zebra TEXT NOT NULL")
+          beta-pos (str/index-of sql "beta INT")
+          zoptional-pos (str/index-of sql "zoptional TEXT")]
+      (is (some? id-pos) "primary key column should be present")
+      (is (some? alpha-pos) "required column alpha should be present")
+      (is (some? zebra-pos) "required column zebra should be present")
+      (is (some? beta-pos) "optional column beta should be present")
+      (is (some? zoptional-pos) "optional column zoptional should be present")
+      ;; Primary key comes first
+      (is (< id-pos alpha-pos) "primary key before required columns")
+      (is (< id-pos zebra-pos) "primary key before required columns")
+      ;; Required columns come before optional columns
+      (is (< alpha-pos beta-pos) "required before optional")
+      (is (< zebra-pos beta-pos) "required before optional")
+      ;; Required columns are sorted alphabetically
+      (is (< alpha-pos zebra-pos) "required columns sorted alphabetically")
+      ;; Optional columns are sorted alphabetically
+      (is (< beta-pos zoptional-pos) "optional columns sorted alphabetically"))))
+
 ;; --- Type coercion tests ---
 
 (deftest coercion-roundtrip-test

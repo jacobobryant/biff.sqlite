@@ -50,8 +50,20 @@
                    " ON " tbl "(" col-name ");"))))
         table-cols))
 
+(defn- sort-columns
+  "Sort columns: primary key first, then required (alphabetically), then optional (alphabetically)."
+  [table-cols]
+  (sort-by (fn [col]
+             [(cond
+                (:primary-key col) 0
+                (:required col)    1
+                :else              2)
+              (util/col-col-name (:id col))])
+           table-cols))
+
 (defn- generate-create-table [table-name table-cols]
-  (let [col-defs (mapv generate-column-def table-cols)
+  (let [table-cols (sort-columns table-cols)
+        col-defs (mapv generate-column-def table-cols)
         constraints (generate-table-constraints table-cols)
         lines (vec (concat col-defs constraints))
         formatted (map-indexed
