@@ -69,7 +69,7 @@
   "Execute an INSERT, UPDATE, or DELETE statement with authorization checks.
 
    Like `execute`, but:
-   1. Only accepts HoneySQL maps for INSERT, UPDATE, or DELETE.
+   1. Only accepts HoneySQL maps for INSERT, UPDATE, DELETE, or INSERT...ON CONFLICT.
    2. Generates a diff describing the changes (vector of maps with :table, :op,
       :before, :after).
    3. Calls the `:biff.sqlite/authorize` function from ctx with `(authorize ctx diff)`.
@@ -79,7 +79,6 @@
       function can query these via `(execute (set/rename-keys ctx
       {:biff.sqlite/before-conn :biff.sqlite/read-pool}) ...)`.
    4. If authorize returns falsy, aborts the transaction and throws an exception.
-   5. INSERT statements with :on-conflict are rejected (throw an exception).
 
    The diff is a vector of maps:
      {:table  :user        ; table keyword
@@ -89,13 +88,11 @@
 
    Returns the diff vector on success."
   [ctx input]
-  (let [{:biff.sqlite/keys [columns write-conn read-pool authorize]} ctx
-        columns (or columns {})]
-    (when-not authorize
-      (throw (ex-info "authorized-write requires :biff.sqlite/authorize in ctx."
-                      {})))
-    (locking write-lock
-      (authorize/authorized-write! write-conn read-pool columns authorize ctx input))))
+  (when-not (:biff.sqlite/authorize ctx)
+    (throw (ex-info "authorized-write requires :biff.sqlite/authorize in ctx."
+                    {})))
+  (locking write-lock
+    (authorize/authorized-write! ctx input)))
 
 (defn use-litestream
   "Biff component for litestream replication. Downloads the litestream binary

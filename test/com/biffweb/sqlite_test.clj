@@ -595,22 +595,44 @@
         (is (= "u1-new" (-> create-entry :after :user/id)))
         (is (nil? (:before create-entry)))))))
 
-(deftest authorized-write-rejects-on-conflict-test
-  (testing "insert with :on-conflict throws"
+(deftest authorized-write-upsert-test
+  (testing "insert with :on-conflict generates correct diff"
     (let [ctx {:biff.sqlite/read-pool *conn*
                :biff.sqlite/write-conn *conn*
                :biff.sqlite/columns test-columns
-               :biff.sqlite/authorize allow-all}]
-      (is (thrown-with-msg?
-           clojure.lang.ExceptionInfo #"ON CONFLICT"
-           (biff.sqlite/authorized-write
-            ctx
-            {:insert-into :user
-             :values [{:user/id "u1"
-                       :user/name "Alice2"
-                       :user/joined-at (Instant/ofEpochMilli 1700000000000)}]
-             :on-conflict [:user/id]
-             :do-update-set [:user/name]}))))))
+               :biff.sqlite/authorize allow-all}
+          ;; u1 already exists with name "Alice", so this should update
+          diff (biff.sqlite/authorized-write
+                ctx
+                {:insert-into :user
+                 :values [{:user/id "u1"
+                           :user/name "Alice2"
+                           :user/joined-at (Instant/ofEpochMilli 1700000000000)}]
+                 :on-conflict [:user/id]
+                 :do-update-set [:user/name]})]
+      (is (= 1 (count diff)))
+      (is (= :update (-> diff first :op)))
+      (is (= "Alice" (-> diff first :before :user/name)))
+      (is (= "Alice2" (-> diff first :after :user/name))))))
+
+(deftest authorized-write-upsert-new-record-test
+  (testing "insert with :on-conflict creates new record when no conflict"
+    (let [ctx {:biff.sqlite/read-pool *conn*
+               :biff.sqlite/write-conn *conn*
+               :biff.sqlite/columns test-columns
+               :biff.sqlite/authorize allow-all}
+          diff (biff.sqlite/authorized-write
+                ctx
+                {:insert-into :user
+                 :values [{:user/id "u-new"
+                           :user/name "NewUser"
+                           :user/joined-at (Instant/ofEpochMilli 1700000000000)}]
+                 :on-conflict [:user/id]
+                 :do-update-set [:user/name]})]
+      (is (= 1 (count diff)))
+      (is (= :create (-> diff first :op)))
+      (is (nil? (-> diff first :before)))
+      (is (= "NewUser" (-> diff first :after :user/name))))))
 
 (deftest authorized-write-denied-test
   (testing "when authorize returns false, transaction is rolled back"

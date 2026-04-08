@@ -43,12 +43,8 @@
   (jdbc/execute! conn sql-vec {:builder-fn builder-fn}))
 
 (defn- process-insert!
-  "Process an INSERT statement: add :returning :*, execute, return diff entries.
-   Throws if the statement includes :on-conflict."
+  "Process a plain INSERT statement (no :on-conflict): add :returning :*, execute, return diff entries."
   [conn stmt builder-fn enum-val->int]
-  (when (or (:on-conflict stmt) (some #{:on-conflict} (keys stmt)))
-    (throw (ex-info "authorized-write does not support INSERT ... ON CONFLICT statements. Split into separate INSERT and UPDATE statements."
-                    {:statement stmt})))
   (let [table-kw (extract-table stmt)
         returning-stmt (assoc stmt :returning [:*])
         sql-vec (format-and-coerce returning-stmt enum-val->int)
@@ -75,30 +71,49 @@
           results)))
 
 (defn- process-update!
-  "Process an UPDATE statement:
-   1. Convert to SELECT :* to get before-values
-   2. Execute the UPDATE with :returning :*
-   3. Group by primary key to pair before/after
-   4. Handle primary key changes (treat as delete + insert)"
-  [conn stmt normalized-columns builder-fn enum-val->int]
+  "Process an UPDATE or INSERT...ON CONFLICT statement:
+   1. Execute the write statement with :returning :* to get after-values
+   2. Extract primary keys from the results
+   3. Query before-conn for the original records
+   4. Pair before/after by primary key to generate diff entries"
+  [write-tx before-tx stmt normalized-columns builder-fn enum-val->int]
   (let [table-kw (extract-table stmt)
         pk-key (find-primary-key normalized-columns table-kw)]
     (when-not pk-key
-      (throw (ex-info "authorized-write requires a primary key for UPDATE statements."
+      (throw (ex-info "authorized-write requires a primary key for UPDATE/upsert statements."
                       {:table table-kw})))
-    (let [;; Build a SELECT to get before-values using the same WHERE clause
-          select-stmt (cond-> {:select [:*]
-                              :from table-kw
-                              :where (:where stmt)}
-                       (:order-by stmt) (assoc :order-by (:order-by stmt))
-                       (:limit stmt) (assoc :limit (:limit stmt)))
-          select-sql (format-and-coerce select-stmt enum-val->int)
-          before-rows (execute-sql! conn select-sql builder-fn)
+    (let [;; Query before-conn for original records using the primary keys
+          ;; We need to get the before state BEFORE executing the write
+          before-pks (when (:update stmt)
+                       (let [select-stmt (cond-> {:select [pk-key]
+                                                  :from table-kw
+                                                  :where (:where stmt)}
+                                           (:order-by stmt) (assoc :order-by (:order-by stmt))
+                                           (:limit stmt) (assoc :limit (:limit stmt)))
+                             select-sql (format-and-coerce select-stmt enum-val->int)]
+                         (mapv #(get % pk-key) (execute-sql! write-tx select-sql builder-fn))))
+          ;; For INSERT...ON CONFLICT, get the PKs from the values being inserted
+          before-pks (or before-pks
+                        (when (:insert-into stmt)
+                          (let [pk-name (name pk-key)
+                                pk-col-kw (keyword (name table-kw) pk-name)]
+                            (->> (:values stmt)
+                                 (map #(get % pk-col-kw))
+                                 (filter some?)
+                                 vec))))
+          ;; Query before-conn for original records
+          before-rows (when (seq before-pks)
+                        (execute-sql! before-tx
+                                      (format-and-coerce {:select [:*]
+                                                          :from table-kw
+                                                          :where [:in pk-key before-pks]}
+                                                         enum-val->int)
+                                      builder-fn))
           before-by-pk (into {} (map (fn [row] [(get row pk-key) (into {} row)])) before-rows)
-          ;; Execute the actual UPDATE with :returning :*
+          ;; Execute the actual write with :returning :*
           returning-stmt (assoc stmt :returning [:*])
-          update-sql (format-and-coerce returning-stmt enum-val->int)
-          after-rows (execute-sql! conn update-sql builder-fn)
+          write-sql (format-and-coerce returning-stmt enum-val->int)
+          after-rows (execute-sql! write-tx write-sql builder-fn)
           after-by-pk (into {} (map (fn [row] [(get row pk-key) (into {} row)])) after-rows)
           ;; All PKs involved
           all-pks (distinct (concat (keys before-by-pk) (keys after-by-pk)))]
@@ -119,7 +134,7 @@
        all-pks))))
 
 (defn- classify-statement
-  "Classify a HoneySQL statement as :insert, :update, or :delete.
+  "Classify a HoneySQL statement as :insert, :upsert, :update, or :delete.
    Throws if the statement is not a write statement."
   [stmt]
   (cond
@@ -127,6 +142,7 @@
     (throw (ex-info "authorized-write only accepts HoneySQL maps."
                     {:input stmt}))
 
+    (and (:insert-into stmt) (:on-conflict stmt)) :upsert
     (:insert-into stmt) :insert
     (:update stmt)      :update
     (:delete-from stmt) :delete
@@ -144,30 +160,25 @@
    database state before and after the write.
 
    Parameters:
-   - conn: the write connection
-   - read-pool: the read connection pool (DataSource) or a plain connection
-   - columns: the raw columns map (keyword -> props)
-   - authorize-fn: (fn [ctx diff] ...) — must return truthy to allow the write
-   - ctx: the system context map
-   - input: a HoneySQL map (INSERT, UPDATE, or DELETE)"
-  [conn read-pool columns authorize-fn ctx input]
-  (let [{:keys [builder-fn enum-val->int normalized-columns]} (coerce/memoized-coercions columns)
-        pool? (instance? javax.sql.DataSource read-pool)
-        before-conn (if pool? (.getConnection ^javax.sql.DataSource read-pool) read-pool)]
-    (try
-      (validate/validate-honeysql-input! normalized-columns input)
-      (let [stmt-type (classify-statement input)]
-        (jdbc/with-transaction [tx conn {:isolation :serializable}]
+   - ctx: the system context map (must contain :biff.sqlite/write-conn, :biff.sqlite/read-pool,
+          :biff.sqlite/columns, and :biff.sqlite/authorize)
+   - input: a HoneySQL map (INSERT, UPDATE, DELETE, or INSERT...ON CONFLICT)"
+  [ctx input]
+  (let [{:biff.sqlite/keys [columns write-conn read-pool authorize]} ctx
+        columns (or columns {})
+        {:keys [builder-fn enum-val->int normalized-columns]} (coerce/memoized-coercions columns)]
+    (validate/validate-honeysql-input! normalized-columns input)
+    (let [stmt-type (classify-statement input)]
+      (jdbc/with-transaction [read-tx read-pool]
+        (jdbc/with-transaction [write-tx write-conn {:isolation :serializable}]
           (let [diff (case stmt-type
-                       :insert (process-insert! tx input builder-fn enum-val->int)
-                       :delete (process-delete! tx input builder-fn enum-val->int)
-                       :update (process-update! tx input normalized-columns builder-fn enum-val->int))
+                       :insert (process-insert! write-tx input builder-fn enum-val->int)
+                       :delete (process-delete! write-tx input builder-fn enum-val->int)
+                       (:update :upsert) (process-update! write-tx read-tx input normalized-columns builder-fn enum-val->int))
                 auth-ctx (assoc ctx
-                                :biff.sqlite/before-conn before-conn
-                                :biff.sqlite/after-conn tx)]
-            (when-not (authorize-fn auth-ctx diff)
+                                :biff.sqlite/before-conn read-tx
+                                :biff.sqlite/after-conn write-tx)]
+            (when-not (authorize auth-ctx diff)
               (throw (ex-info "Write rejected by authorization rules."
                               {:diff diff})))
-            diff)))
-      (finally
-        (when pool? (.close ^java.sql.Connection before-conn))))))
+            diff))))))
