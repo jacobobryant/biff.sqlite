@@ -8,14 +8,15 @@
             [honey.sql :as hsql]
             [next.jdbc :as jdbc]))
 
-(defn- find-primary-key
-  "Find the primary key column for the given table keyword from normalized columns."
-  [normalized-columns table-kw]
-  (let [pk-col (first (filter (fn [col]
-                                (and (= table-kw (util/col-table (:id col)))
-                                     (:primary-key col)))
-                               normalized-columns))]
-    (when pk-col (:id pk-col))))
+(def ^:private find-primary-key
+  "Find the primary key column for the given table keyword from normalized columns. Memoized."
+  (memoize
+   (fn [normalized-columns table-kw]
+     (let [pk-col (first (filter (fn [col]
+                                   (and (= table-kw (util/col-table (:id col)))
+                                        (:primary-key col)))
+                                  normalized-columns))]
+       (when pk-col (:id pk-col))))))
 
 (defn- extract-table
   "Extract the table keyword from a HoneySQL statement map."
@@ -86,9 +87,11 @@
       (throw (ex-info "authorized-write requires a primary key for UPDATE statements."
                       {:table table-kw})))
     (let [;; Build a SELECT to get before-values using the same WHERE clause
-          select-stmt {:select [:*]
-                       :from table-kw
-                       :where (:where stmt)}
+          select-stmt (cond-> {:select [:*]
+                              :from table-kw
+                              :where (:where stmt)}
+                       (:order-by stmt) (assoc :order-by (:order-by stmt))
+                       (:limit stmt) (assoc :limit (:limit stmt)))
           select-sql (format-and-coerce select-stmt enum-val->int)
           before-rows (execute-sql! conn select-sql builder-fn)
           before-by-pk (into {} (map (fn [row] [(get row pk-key) (into {} row)])) before-rows)
@@ -99,26 +102,21 @@
           after-by-pk (into {} (map (fn [row] [(get row pk-key) (into {} row)])) after-rows)
           ;; All PKs involved
           all-pks (distinct (concat (keys before-by-pk) (keys after-by-pk)))]
-      (vec
+      (into []
        (mapcat
         (fn [pk]
           (let [before (get before-by-pk pk)
                 after (get after-by-pk pk)]
             (cond
-              ;; Normal update: same PK in both before and after
               (and before after)
               [{:table table-kw :op :update :before before :after after}]
 
-              ;; PK was in before but not in after — the PK was changed away from this value
-              ;; This means the record was "deleted" (from this PK's perspective)
               (and before (not after))
               [{:table table-kw :op :delete :before before :after nil}]
 
-              ;; PK is in after but not in before — the PK was changed to this value
-              ;; This means a record was "created" (from this PK's perspective)
               (and after (not before))
-              [{:table table-kw :op :create :before nil :after after}])))
-        all-pks)))))
+              [{:table table-kw :op :create :before nil :after after}]))))
+       all-pks))))
 
 (defn- classify-statement
   "Classify a HoneySQL statement as :insert, :update, or :delete.
