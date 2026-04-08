@@ -73,6 +73,11 @@
    2. Generates a diff describing the changes (vector of maps with :table, :op,
       :before, :after).
    3. Calls the `:biff.sqlite/authorize` function from ctx with `(authorize ctx diff)`.
+      The ctx passed to authorize includes `:biff.sqlite/before-conn` (a read
+      transaction opened before the write) and `:biff.sqlite/after-conn` (the write
+      transaction connection, which can see uncommitted changes). The authorize
+      function can query these via `(execute (set/rename-keys ctx
+      {:biff.sqlite/before-conn :biff.sqlite/read-pool}) ...)`.
    4. If authorize returns falsy, aborts the transaction and throws an exception.
    5. INSERT statements with :on-conflict are rejected (throw an exception).
 
@@ -84,13 +89,13 @@
 
    Returns the diff vector on success."
   [ctx input]
-  (let [{:biff.sqlite/keys [columns write-conn authorize]} ctx
+  (let [{:biff.sqlite/keys [columns write-conn read-pool authorize]} ctx
         columns (or columns {})]
     (when-not authorize
       (throw (ex-info "authorized-write requires :biff.sqlite/authorize in ctx."
                       {})))
     (locking write-lock
-      (authorize/authorized-write! write-conn columns authorize ctx input))))
+      (authorize/authorized-write! write-conn read-pool columns authorize ctx input))))
 
 (defn use-litestream
   "Biff component for litestream replication. Downloads the litestream binary

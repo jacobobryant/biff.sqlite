@@ -139,22 +139,35 @@
   "Execute a write statement within a transaction, generating a diff and checking
    authorization. Returns the diff if authorized.
 
+   Opens a read transaction (before-conn) and a write transaction (after-conn).
+   Both are added to ctx before calling authorize-fn, so it can query the
+   database state before and after the write.
+
    Parameters:
    - conn: the write connection
+   - read-pool: the read connection pool (DataSource) or a plain connection
    - columns: the raw columns map (keyword -> props)
    - authorize-fn: (fn [ctx diff] ...) — must return truthy to allow the write
    - ctx: the system context map
    - input: a HoneySQL map (INSERT, UPDATE, or DELETE)"
-  [conn columns authorize-fn ctx input]
-  (let [{:keys [builder-fn enum-val->int normalized-columns]} (coerce/memoized-coercions columns)]
-    (validate/validate-honeysql-input! normalized-columns input)
-    (let [stmt-type (classify-statement input)]
-      (jdbc/with-transaction [tx conn {:isolation :serializable}]
-        (let [diff (case stmt-type
-                     :insert (process-insert! tx input builder-fn enum-val->int)
-                     :delete (process-delete! tx input builder-fn enum-val->int)
-                     :update (process-update! tx input normalized-columns builder-fn enum-val->int))]
-          (when-not (authorize-fn ctx diff)
-            (throw (ex-info "Write rejected by authorization rules."
-                            {:diff diff})))
-          diff)))))
+  [conn read-pool columns authorize-fn ctx input]
+  (let [{:keys [builder-fn enum-val->int normalized-columns]} (coerce/memoized-coercions columns)
+        pool? (instance? javax.sql.DataSource read-pool)
+        before-conn (if pool? (.getConnection ^javax.sql.DataSource read-pool) read-pool)]
+    (try
+      (validate/validate-honeysql-input! normalized-columns input)
+      (let [stmt-type (classify-statement input)]
+        (jdbc/with-transaction [tx conn {:isolation :serializable}]
+          (let [diff (case stmt-type
+                       :insert (process-insert! tx input builder-fn enum-val->int)
+                       :delete (process-delete! tx input builder-fn enum-val->int)
+                       :update (process-update! tx input normalized-columns builder-fn enum-val->int))
+                auth-ctx (assoc ctx
+                                :biff.sqlite/before-conn before-conn
+                                :biff.sqlite/after-conn tx)]
+            (when-not (authorize-fn auth-ctx diff)
+              (throw (ex-info "Write rejected by authorization rules."
+                              {:diff diff})))
+            diff)))
+      (finally
+        (when pool? (.close ^java.sql.Connection before-conn))))))

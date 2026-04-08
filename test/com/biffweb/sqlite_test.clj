@@ -712,7 +712,7 @@
             "DELETE FROM user WHERE id = 'u1'"))))))
 
 (deftest authorized-write-authorize-receives-ctx-test
-  (testing "authorize fn receives ctx and diff"
+  (testing "authorize fn receives ctx with before-conn and after-conn"
     (let [received (atom nil)
           ctx {:biff.sqlite/read-pool *conn*
                :biff.sqlite/write-conn *conn*
@@ -729,6 +729,8 @@
                   :user/joined-at (Instant/ofEpochMilli 1700000000000)}]})
       (is (some? @received))
       (is (contains? (:ctx-keys @received) :biff.sqlite/authorize))
+      (is (contains? (:ctx-keys @received) :biff.sqlite/before-conn))
+      (is (contains? (:ctx-keys @received) :biff.sqlite/after-conn))
       (is (= 1 (count (:diff @received))))
       (is (= :create (-> @received :diff first :op))))))
 
