@@ -4,12 +4,14 @@
    Public API:
    - `use-sqlite`          — Biff component for schema migrations, connection pooling, and litestream replication.
    - `execute`             — Execute SQL queries/statements with automatic type coercion and validation.
+   - `authorized-write`    — Execute INSERT/UPDATE/DELETE with authorization checks.
    - `use-litestream`      — Biff component for litestream replication (called by use-sqlite automatically).
    - `generate-schema-sql` — Generate the complete schema SQL string from column definitions.
    - `make-resolvers`      — Create biff.inject resolvers for SQLite tables from column definitions."
   (:require
    [clojure.string :as str]
    [clojure.tools.logging :as log]
+   [com.biffweb.sqlite.impl.authorize :as authorize]
    [com.biffweb.sqlite.impl.coerce :as coerce]
    [com.biffweb.sqlite.impl.litestream :as litestream]
    [com.biffweb.sqlite.impl.pool :as pool]
@@ -62,6 +64,33 @@
     (if (util/write-statement? (first sql-vec))
       (locking write-lock (jdbc/execute! write-conn sql-vec opts))
       (jdbc/execute! read-pool sql-vec opts))))
+
+(defn authorized-write
+  "Execute an INSERT, UPDATE, or DELETE statement with authorization checks.
+
+   Like `execute`, but:
+   1. Only accepts HoneySQL maps for INSERT, UPDATE, or DELETE.
+   2. Generates a diff describing the changes (vector of maps with :table, :op,
+      :before, :after).
+   3. Calls the `:biff.sqlite/authorize` function from ctx with `(authorize ctx diff)`.
+   4. If authorize returns falsy, aborts the transaction and throws an exception.
+   5. INSERT statements with :on-conflict are rejected (throw an exception).
+
+   The diff is a vector of maps:
+     {:table  :user        ; table keyword
+      :op     :create      ; :create, :update, or :delete
+      :before {...}        ; nil for :create
+      :after  {...}}       ; nil for :delete
+
+   Returns the diff vector on success."
+  [ctx input]
+  (let [{:biff.sqlite/keys [columns write-conn authorize]} ctx
+        columns (or columns {})]
+    (when-not authorize
+      (throw (ex-info "authorized-write requires :biff.sqlite/authorize in ctx."
+                      {})))
+    (locking write-lock
+      (authorize/authorized-write! write-conn columns authorize ctx input))))
 
 (defn use-litestream
   "Biff component for litestream replication. Downloads the litestream binary

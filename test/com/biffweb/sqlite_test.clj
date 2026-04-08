@@ -477,3 +477,367 @@
       (is (= "Hello" (:entry/title (second results))))
       (is (= "u1" (:entry/author-id (second results))))
       (is (= {:user/id "u1"} (:entry/author (second results)))))))
+
+;; --- authorized-write tests ---
+
+(defn- allow-all [_ctx _diff] true)
+(defn- deny-all [_ctx _diff] false)
+
+(deftest authorized-write-insert-test
+  (testing "insert generates :create diff entries"
+    (let [ctx {:biff.sqlite/read-pool *conn*
+               :biff.sqlite/write-conn *conn*
+               :biff.sqlite/columns test-columns
+               :biff.sqlite/authorize allow-all}
+          now (Instant/ofEpochMilli 1700000000000)
+          diff (biff.sqlite/authorized-write
+                ctx
+                {:insert-into :user
+                 :values [{:user/id "u2"
+                           :user/name "Bob"
+                           :user/joined-at now}]})]
+      (is (= 1 (count diff)))
+      (is (= :user (-> diff first :table)))
+      (is (= :create (-> diff first :op)))
+      (is (nil? (-> diff first :before)))
+      (is (= "u2" (-> diff first :after :user/id)))
+      (is (= "Bob" (-> diff first :after :user/name)))
+      (is (= now (-> diff first :after :user/joined-at))))))
+
+(deftest authorized-write-insert-multiple-test
+  (testing "insert with multiple values generates multiple :create diff entries"
+    (let [ctx {:biff.sqlite/read-pool *conn*
+               :biff.sqlite/write-conn *conn*
+               :biff.sqlite/columns test-columns
+               :biff.sqlite/authorize allow-all}
+          now (Instant/ofEpochMilli 1700000000000)
+          diff (biff.sqlite/authorized-write
+                ctx
+                {:insert-into :user
+                 :values [{:user/id "u2"
+                           :user/name "Bob"
+                           :user/joined-at now}
+                          {:user/id "u3"
+                           :user/name "Charlie"
+                           :user/joined-at now}]})]
+      (is (= 2 (count diff)))
+      (is (every? #(= :create (:op %)) diff))
+      (is (every? #(nil? (:before %)) diff))
+      (is (= #{"u2" "u3"} (set (map #(-> % :after :user/id) diff)))))))
+
+(deftest authorized-write-delete-test
+  (testing "delete generates :delete diff entries with :before values"
+    (let [ctx {:biff.sqlite/read-pool *conn*
+               :biff.sqlite/write-conn *conn*
+               :biff.sqlite/columns test-columns
+               :biff.sqlite/authorize allow-all}
+          diff (biff.sqlite/authorized-write
+                ctx
+                {:delete-from :user
+                 :where [:= :user/id "u1"]})]
+      (is (= 1 (count diff)))
+      (is (= :user (-> diff first :table)))
+      (is (= :delete (-> diff first :op)))
+      (is (= "u1" (-> diff first :before :user/id)))
+      (is (= "Alice" (-> diff first :before :user/name)))
+      (is (nil? (-> diff first :after))))))
+
+(deftest authorized-write-delete-nonexistent-test
+  (testing "delete of nonexistent record produces empty diff"
+    (let [ctx {:biff.sqlite/read-pool *conn*
+               :biff.sqlite/write-conn *conn*
+               :biff.sqlite/columns test-columns
+               :biff.sqlite/authorize allow-all}
+          diff (biff.sqlite/authorized-write
+                ctx
+                {:delete-from :user
+                 :where [:= :user/id "nonexistent"]})]
+      (is (= [] diff)))))
+
+(deftest authorized-write-update-test
+  (testing "update generates :update diff with :before and :after"
+    (let [ctx {:biff.sqlite/read-pool *conn*
+               :biff.sqlite/write-conn *conn*
+               :biff.sqlite/columns test-columns
+               :biff.sqlite/authorize allow-all}
+          diff (biff.sqlite/authorized-write
+                ctx
+                {:update :user
+                 :set {:user/name "Alicia"}
+                 :where [:= :user/id "u1"]})]
+      (is (= 1 (count diff)))
+      (is (= :user (-> diff first :table)))
+      (is (= :update (-> diff first :op)))
+      (is (= "Alice" (-> diff first :before :user/name)))
+      (is (= "Alicia" (-> diff first :after :user/name)))
+      (is (= "u1" (-> diff first :before :user/id)))
+      (is (= "u1" (-> diff first :after :user/id))))))
+
+(deftest authorized-write-update-pk-change-test
+  (testing "update that changes primary key produces delete + create"
+    (let [ctx {:biff.sqlite/read-pool *conn*
+               :biff.sqlite/write-conn *conn*
+               :biff.sqlite/columns test-columns
+               :biff.sqlite/authorize allow-all}
+          diff (biff.sqlite/authorized-write
+                ctx
+                {:update :user
+                 :set {:user/id "u1-new"}
+                 :where [:= :user/id "u1"]})]
+      (is (= 2 (count diff)))
+      (let [ops (set (map :op diff))]
+        (is (contains? ops :delete))
+        (is (contains? ops :create)))
+      (let [delete-entry (first (filter #(= :delete (:op %)) diff))
+            create-entry (first (filter #(= :create (:op %)) diff))]
+        (is (= "u1" (-> delete-entry :before :user/id)))
+        (is (nil? (:after delete-entry)))
+        (is (= "u1-new" (-> create-entry :after :user/id)))
+        (is (nil? (:before create-entry)))))))
+
+(deftest authorized-write-rejects-on-conflict-test
+  (testing "insert with :on-conflict throws"
+    (let [ctx {:biff.sqlite/read-pool *conn*
+               :biff.sqlite/write-conn *conn*
+               :biff.sqlite/columns test-columns
+               :biff.sqlite/authorize allow-all}]
+      (is (thrown-with-msg?
+           clojure.lang.ExceptionInfo #"ON CONFLICT"
+           (biff.sqlite/authorized-write
+            ctx
+            {:insert-into :user
+             :values [{:user/id "u1"
+                       :user/name "Alice2"
+                       :user/joined-at (Instant/ofEpochMilli 1700000000000)}]
+             :on-conflict [:user/id]
+             :do-update-set [:user/name]}))))))
+
+(deftest authorized-write-denied-test
+  (testing "when authorize returns false, transaction is rolled back"
+    (let [ctx {:biff.sqlite/read-pool *conn*
+               :biff.sqlite/write-conn *conn*
+               :biff.sqlite/columns test-columns
+               :biff.sqlite/authorize deny-all}]
+      (is (thrown-with-msg?
+           clojure.lang.ExceptionInfo #"rejected by authorization"
+           (biff.sqlite/authorized-write
+            ctx
+            {:insert-into :user
+             :values [{:user/id "u2"
+                       :user/name "Bob"
+                       :user/joined-at (Instant/ofEpochMilli 1700000000000)}]})))
+      ;; Verify the insert was rolled back
+      (let [read-ctx {:biff.sqlite/read-pool *conn*
+                      :biff.sqlite/write-conn *conn*
+                      :biff.sqlite/columns test-columns}
+            results (biff.sqlite/execute read-ctx {:select :* :from :user})]
+        (is (= 1 (count results)))
+        (is (= "u1" (:user/id (first results))))))))
+
+(deftest authorized-write-denied-update-rollback-test
+  (testing "denied update is rolled back"
+    (let [ctx {:biff.sqlite/read-pool *conn*
+               :biff.sqlite/write-conn *conn*
+               :biff.sqlite/columns test-columns
+               :biff.sqlite/authorize deny-all}]
+      (is (thrown-with-msg?
+           clojure.lang.ExceptionInfo #"rejected by authorization"
+           (biff.sqlite/authorized-write
+            ctx
+            {:update :user
+             :set {:user/name "Hacker"}
+             :where [:= :user/id "u1"]})))
+      ;; Verify the update was rolled back
+      (let [read-ctx {:biff.sqlite/read-pool *conn*
+                      :biff.sqlite/write-conn *conn*
+                      :biff.sqlite/columns test-columns}
+            results (biff.sqlite/execute read-ctx {:select :* :from :user})]
+        (is (= "Alice" (:user/name (first results))))))))
+
+(deftest authorized-write-denied-delete-rollback-test
+  (testing "denied delete is rolled back"
+    (let [ctx {:biff.sqlite/read-pool *conn*
+               :biff.sqlite/write-conn *conn*
+               :biff.sqlite/columns test-columns
+               :biff.sqlite/authorize deny-all}]
+      (is (thrown-with-msg?
+           clojure.lang.ExceptionInfo #"rejected by authorization"
+           (biff.sqlite/authorized-write
+            ctx
+            {:delete-from :user
+             :where [:= :user/id "u1"]})))
+      ;; Verify the delete was rolled back
+      (let [read-ctx {:biff.sqlite/read-pool *conn*
+                      :biff.sqlite/write-conn *conn*
+                      :biff.sqlite/columns test-columns}
+            results (biff.sqlite/execute read-ctx {:select :* :from :user})]
+        (is (= 1 (count results)))))))
+
+(deftest authorized-write-missing-authorize-fn-test
+  (testing "throws when :biff.sqlite/authorize is missing from ctx"
+    (let [ctx {:biff.sqlite/read-pool *conn*
+               :biff.sqlite/write-conn *conn*
+               :biff.sqlite/columns test-columns}]
+      (is (thrown-with-msg?
+           clojure.lang.ExceptionInfo #"requires :biff.sqlite/authorize"
+           (biff.sqlite/authorized-write
+            ctx
+            {:insert-into :user
+             :values [{:user/id "u2"
+                       :user/name "Bob"
+                       :user/joined-at (Instant/ofEpochMilli 1700000000000)}]}))))))
+
+(deftest authorized-write-rejects-select-test
+  (testing "throws when given a SELECT statement"
+    (let [ctx {:biff.sqlite/read-pool *conn*
+               :biff.sqlite/write-conn *conn*
+               :biff.sqlite/columns test-columns
+               :biff.sqlite/authorize allow-all}]
+      (is (thrown-with-msg?
+           clojure.lang.ExceptionInfo #"only accepts INSERT, UPDATE, or DELETE"
+           (biff.sqlite/authorized-write
+            ctx
+            {:select :* :from :user}))))))
+
+(deftest authorized-write-rejects-raw-sql-test
+  (testing "throws when given a raw SQL string"
+    (let [ctx {:biff.sqlite/read-pool *conn*
+               :biff.sqlite/write-conn *conn*
+               :biff.sqlite/columns test-columns
+               :biff.sqlite/authorize allow-all}]
+      (is (thrown-with-msg?
+           clojure.lang.ExceptionInfo #"only accepts HoneySQL maps"
+           (biff.sqlite/authorized-write
+            ctx
+            "DELETE FROM user WHERE id = 'u1'"))))))
+
+(deftest authorized-write-authorize-receives-ctx-test
+  (testing "authorize fn receives ctx and diff"
+    (let [received (atom nil)
+          ctx {:biff.sqlite/read-pool *conn*
+               :biff.sqlite/write-conn *conn*
+               :biff.sqlite/columns test-columns
+               :biff.sqlite/authorize (fn [ctx diff]
+                                        (reset! received {:ctx-keys (set (keys ctx))
+                                                          :diff diff})
+                                        true)}]
+      (biff.sqlite/authorized-write
+       ctx
+       {:insert-into :user
+        :values [{:user/id "u2"
+                  :user/name "Bob"
+                  :user/joined-at (Instant/ofEpochMilli 1700000000000)}]})
+      (is (some? @received))
+      (is (contains? (:ctx-keys @received) :biff.sqlite/authorize))
+      (is (= 1 (count (:diff @received))))
+      (is (= :create (-> @received :diff first :op))))))
+
+;; --- Representative test cases from yakread/budgetswu patterns ---
+
+(deftest authorized-write-yakread-update-settings-test
+  (testing "update user settings (yakread pattern)"
+    (let [ctx {:biff.sqlite/read-pool *conn*
+               :biff.sqlite/write-conn *conn*
+               :biff.sqlite/columns test-columns
+               :biff.sqlite/authorize allow-all}
+          diff (biff.sqlite/authorized-write
+                ctx
+                {:update :user
+                 :set {:user/name "Alice Updated"}
+                 :where [:= :user/id "u1"]})]
+      (is (= 1 (count diff)))
+      (is (= :update (:op (first diff))))
+      (is (= "Alice" (-> diff first :before :user/name)))
+      (is (= "Alice Updated" (-> diff first :after :user/name))))))
+
+(deftest authorized-write-budgetswu-delete-multiple-test
+  (testing "delete with :in clause (budgetswu pattern)"
+    (jdbc/execute! *conn* ["CREATE TABLE item (id TEXT PRIMARY KEY, label TEXT) STRICT"])
+    (jdbc/execute! *conn* ["INSERT INTO item (id, label) VALUES (?, ?)" "i1" "One"])
+    (jdbc/execute! *conn* ["INSERT INTO item (id, label) VALUES (?, ?)" "i2" "Two"])
+    (jdbc/execute! *conn* ["INSERT INTO item (id, label) VALUES (?, ?)" "i3" "Three"])
+    (let [columns {:item/id    {:type :text :primary-key true}
+                   :item/label {:type :text}}
+          ctx {:biff.sqlite/read-pool *conn*
+               :biff.sqlite/write-conn *conn*
+               :biff.sqlite/columns columns
+               :biff.sqlite/authorize allow-all}
+          diff (biff.sqlite/authorized-write
+                ctx
+                {:delete-from :item
+                 :where [:in :item/id ["i1" "i2"]]})]
+      (is (= 2 (count diff)))
+      (is (every? #(= :delete (:op %)) diff))
+      (is (= #{"i1" "i2"} (set (map #(-> % :before :item/id) diff)))))))
+
+(deftest authorized-write-budgetswu-insert-batch-test
+  (testing "batch insert (budgetswu collection-card pattern)"
+    (jdbc/execute! *conn* ["CREATE TABLE card (id TEXT PRIMARY KEY, card_name TEXT NOT NULL, user_id TEXT NOT NULL) STRICT"])
+    (let [columns {:card/id        {:type :text :primary-key true}
+                   :card/card-name {:type :text :required true}
+                   :card/user-id   {:type :text :required true}}
+          ctx {:biff.sqlite/read-pool *conn*
+               :biff.sqlite/write-conn *conn*
+               :biff.sqlite/columns columns
+               :biff.sqlite/authorize allow-all}
+          diff (biff.sqlite/authorized-write
+                ctx
+                {:insert-into :card
+                 :values [{:card/id "c1"
+                           :card/card-name "Darth Vader"
+                           :card/user-id "u1"}
+                          {:card/id "c2"
+                           :card/card-name "Luke Skywalker"
+                           :card/user-id "u1"}]})]
+      (is (= 2 (count diff)))
+      (is (every? #(= :create (:op %)) diff))
+      (is (= #{"Darth Vader" "Luke Skywalker"}
+             (set (map #(-> % :after :card/card-name) diff)))))))
+
+(deftest authorized-write-update-no-pk-throws-test
+  (testing "update on table without primary key throws"
+    (jdbc/execute! *conn* ["CREATE TABLE log (message TEXT, level TEXT) STRICT"])
+    (jdbc/execute! *conn* ["INSERT INTO log (message, level) VALUES (?, ?)" "hello" "info"])
+    (let [columns {:log/message {:type :text}
+                   :log/level   {:type :text}}
+          ctx {:biff.sqlite/read-pool *conn*
+               :biff.sqlite/write-conn *conn*
+               :biff.sqlite/columns columns
+               :biff.sqlite/authorize allow-all}]
+      (is (thrown-with-msg?
+           clojure.lang.ExceptionInfo #"primary key"
+           (biff.sqlite/authorized-write
+            ctx
+            {:update :log
+             :set {:log/level "warn"}
+             :where [:= :log/message "hello"]}))))))
+
+(deftest authorized-write-conditional-authorize-test
+  (testing "authorize fn can inspect diff to make decisions"
+    (let [;; Only allow creating users, not deleting them
+          authorize-fn (fn [_ctx diff]
+                         (every? #(= :create (:op %)) diff))
+          ctx {:biff.sqlite/read-pool *conn*
+               :biff.sqlite/write-conn *conn*
+               :biff.sqlite/columns test-columns
+               :biff.sqlite/authorize authorize-fn}]
+      ;; Insert should succeed
+      (let [diff (biff.sqlite/authorized-write
+                  ctx
+                  {:insert-into :user
+                   :values [{:user/id "u2"
+                             :user/name "Bob"
+                             :user/joined-at (Instant/ofEpochMilli 1700000000000)}]})]
+        (is (= 1 (count diff))))
+      ;; Delete should be rejected
+      (is (thrown-with-msg?
+           clojure.lang.ExceptionInfo #"rejected by authorization"
+           (biff.sqlite/authorized-write
+            ctx
+            {:delete-from :user
+             :where [:= :user/id "u2"]})))
+      ;; Verify u2 still exists (delete was rolled back)
+      (let [results (biff.sqlite/execute
+                     (dissoc ctx :biff.sqlite/authorize)
+                     {:select :* :from :user :where [:= :user/id "u2"]})]
+        (is (= 1 (count results)))))))
