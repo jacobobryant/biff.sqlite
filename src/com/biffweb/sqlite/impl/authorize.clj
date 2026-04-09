@@ -135,12 +135,16 @@
 
 (defn- classify-statement
   "Classify a HoneySQL statement as :insert, :upsert, :update, or :delete.
-   Throws if the statement is not a write statement."
+   Throws if the statement is not a write statement, or if it uses REPLACE."
   [stmt]
   (cond
     (not (map? stmt))
     (throw (ex-info "authorized-write only accepts HoneySQL maps."
                     {:input stmt}))
+
+    (:replace-into stmt)
+    (throw (ex-info "authorized-write does not support REPLACE INTO statements. Use INSERT ... ON CONFLICT instead."
+                    {:statement stmt}))
 
     (and (:insert-into stmt) (:on-conflict stmt)) :upsert
     (:insert-into stmt) :insert
@@ -151,6 +155,43 @@
     (throw (ex-info "authorized-write only accepts INSERT, UPDATE, or DELETE statements."
                     {:statement stmt}))))
 
+(defn- validate-no-pk-changes!
+  "Validate that the statement does not attempt to change primary key columns.
+   For UPDATE: asserts that :set is a map with keyword keys, none of which are primary keys.
+   For UPSERT: asserts that :do-update-set is a vector of keywords not containing primary keys."
+  [stmt stmt-type normalized-columns]
+  (let [table-kw (extract-table stmt)
+        pk-key (find-primary-key normalized-columns table-kw)]
+    (when pk-key
+      (case stmt-type
+        :update
+        (let [set-val (:set stmt)]
+          (when-not (map? set-val)
+            (throw (ex-info "authorized-write UPDATE requires :set to be a map."
+                            {:set set-val})))
+          (when-not (every? keyword? (keys set-val))
+            (throw (ex-info "authorized-write UPDATE requires all :set keys to be keywords."
+                            {:set-keys (keys set-val)})))
+          (when (contains? set-val pk-key)
+            (throw (ex-info (str "authorized-write does not allow changing primary key columns. "
+                                 "Found primary key " pk-key " in :set.")
+                            {:primary-key pk-key :set-keys (keys set-val)}))))
+
+        :upsert
+        (let [update-set (:do-update-set stmt)]
+          (when-not (vector? update-set)
+            (throw (ex-info "authorized-write UPSERT requires :do-update-set to be a vector."
+                            {:do-update-set update-set})))
+          (when-not (every? keyword? update-set)
+            (throw (ex-info "authorized-write UPSERT requires all :do-update-set entries to be keywords."
+                            {:do-update-set update-set})))
+          (when (some #{pk-key} update-set)
+            (throw (ex-info (str "authorized-write does not allow changing primary key columns. "
+                                 "Found primary key " pk-key " in :do-update-set.")
+                            {:primary-key pk-key :do-update-set update-set}))))
+
+        nil))))
+
 (defn authorized-write!
   "Execute a write statement within a transaction, generating a diff and checking
    authorization. Returns the diff if authorized.
@@ -158,6 +199,9 @@
    Opens a read transaction (before-conn) and a write transaction (after-conn).
    Both are added to ctx before calling authorize-fn, so it can query the
    database state before and after the write.
+
+   Primary key changes are not allowed in UPDATE or UPSERT statements.
+   REPLACE INTO statements are rejected.
 
    Parameters:
    - ctx: the system context map (must contain :biff.sqlite/write-conn, :biff.sqlite/read-pool,
@@ -167,8 +211,9 @@
   (let [{:biff.sqlite/keys [columns write-conn read-pool authorize]} ctx
         columns (or columns {})
         {:keys [builder-fn enum-val->int normalized-columns]} (coerce/memoized-coercions columns)]
-    (validate/validate-honeysql-input! normalized-columns input)
     (let [stmt-type (classify-statement input)]
+      (validate-no-pk-changes! input stmt-type normalized-columns)
+      (validate/validate-honeysql-input! normalized-columns input)
       (jdbc/with-transaction [read-tx read-pool]
         (jdbc/with-transaction [write-tx write-conn {:isolation :serializable}]
           (let [diff (case stmt-type

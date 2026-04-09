@@ -574,26 +574,18 @@
       (is (= "u1" (-> diff first :after :user/id))))))
 
 (deftest authorized-write-update-pk-change-test
-  (testing "update that changes primary key produces delete + create"
+  (testing "update that changes primary key throws an exception"
     (let [ctx {:biff.sqlite/read-pool *conn*
                :biff.sqlite/write-conn *conn*
                :biff.sqlite/columns test-columns
-               :biff.sqlite/authorize allow-all}
-          diff (biff.sqlite/authorized-write
-                ctx
-                {:update :user
-                 :set {:user/id "u1-new"}
-                 :where [:= :user/id "u1"]})]
-      (is (= 2 (count diff)))
-      (let [ops (set (map :op diff))]
-        (is (contains? ops :delete))
-        (is (contains? ops :create)))
-      (let [delete-entry (first (filter #(= :delete (:op %)) diff))
-            create-entry (first (filter #(= :create (:op %)) diff))]
-        (is (= "u1" (-> delete-entry :before :user/id)))
-        (is (nil? (:after delete-entry)))
-        (is (= "u1-new" (-> create-entry :after :user/id)))
-        (is (nil? (:before create-entry)))))))
+               :biff.sqlite/authorize allow-all}]
+      (is (thrown-with-msg?
+           clojure.lang.ExceptionInfo #"does not allow changing primary key"
+           (biff.sqlite/authorized-write
+            ctx
+            {:update :user
+             :set {:user/id "u1-new"}
+             :where [:= :user/id "u1"]}))))))
 
 (deftest authorized-write-upsert-test
   (testing "insert with :on-conflict generates correct diff"
@@ -633,6 +625,52 @@
       (is (= :create (-> diff first :op)))
       (is (nil? (-> diff first :before)))
       (is (= "NewUser" (-> diff first :after :user/name))))))
+
+(deftest authorized-write-upsert-pk-in-do-update-set-test
+  (testing "upsert with primary key in :do-update-set throws"
+    (let [ctx {:biff.sqlite/read-pool *conn*
+               :biff.sqlite/write-conn *conn*
+               :biff.sqlite/columns test-columns
+               :biff.sqlite/authorize allow-all}]
+      (is (thrown-with-msg?
+           clojure.lang.ExceptionInfo #"does not allow changing primary key"
+           (biff.sqlite/authorized-write
+            ctx
+            {:insert-into :user
+             :values [{:user/id "u1"
+                       :user/name "Alice2"
+                       :user/joined-at (Instant/ofEpochMilli 1700000000000)}]
+             :on-conflict [:user/id]
+             :do-update-set [:user/id :user/name]}))))))
+
+(deftest authorized-write-rejects-replace-into-test
+  (testing "replace-into throws"
+    (let [ctx {:biff.sqlite/read-pool *conn*
+               :biff.sqlite/write-conn *conn*
+               :biff.sqlite/columns test-columns
+               :biff.sqlite/authorize allow-all}]
+      (is (thrown-with-msg?
+           clojure.lang.ExceptionInfo #"REPLACE INTO"
+           (biff.sqlite/authorized-write
+            ctx
+            {:replace-into :user
+             :values [{:user/id "u1"
+                       :user/name "Alice2"
+                       :user/joined-at (Instant/ofEpochMilli 1700000000000)}]}))))))
+
+(deftest authorized-write-update-set-must-be-map-test
+  (testing "update with non-map :set throws"
+    (let [ctx {:biff.sqlite/read-pool *conn*
+               :biff.sqlite/write-conn *conn*
+               :biff.sqlite/columns test-columns
+               :biff.sqlite/authorize allow-all}]
+      (is (thrown-with-msg?
+           clojure.lang.ExceptionInfo #"requires :set to be a map"
+           (biff.sqlite/authorized-write
+            ctx
+            {:update :user
+             :set [:user/name]
+             :where [:= :user/id "u1"]}))))))
 
 (deftest authorized-write-denied-test
   (testing "when authorize returns false, transaction is rolled back"
