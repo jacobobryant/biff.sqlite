@@ -2,7 +2,6 @@
   "Internal implementation for authorized write transactions.
    Generates diff data structures and manages transaction rollback."
   (:require [com.biffweb.sqlite.impl.coerce :as coerce]
-            [com.biffweb.sqlite.impl.query :as query]
             [com.biffweb.sqlite.impl.util :as util]
             [com.biffweb.sqlite.impl.validate :as validate]
             [honey.sql :as hsql]
@@ -76,31 +75,30 @@
 
 (defn- process-update!
   "Process an UPDATE statement:
-   1. Convert to SELECT :* to get before-values
-   2. Execute the UPDATE with :returning :*
-   3. Group by primary key to pair before/after
-   4. Handle primary key changes (treat as delete + insert)"
-  [conn stmt normalized-columns builder-fn enum-val->int]
+   1. Execute the UPDATE with :returning :* on write-tx
+   2. Get primary keys from the result
+   3. Query the read-tx for before-values using those primary keys
+   4. Pair before/after by primary key"
+  [read-tx write-tx stmt normalized-columns builder-fn enum-val->int]
   (let [table-kw (extract-table stmt)
         pk-key (find-primary-key normalized-columns table-kw)]
     (when-not pk-key
       (throw (ex-info "authorized-write requires a primary key for UPDATE statements."
                       {:table table-kw})))
-    (let [;; Build a SELECT to get before-values using the same WHERE clause
-          select-stmt (cond-> {:select [:*]
-                              :from table-kw
-                              :where (:where stmt)}
-                       (:order-by stmt) (assoc :order-by (:order-by stmt))
-                       (:limit stmt) (assoc :limit (:limit stmt)))
-          select-sql (format-and-coerce select-stmt enum-val->int)
-          before-rows (execute-sql! conn select-sql builder-fn)
-          before-by-pk (into {} (map (fn [row] [(get row pk-key) (into {} row)])) before-rows)
-          ;; Execute the actual UPDATE with :returning :*
+    (let [;; Execute the UPDATE with :returning :* on the write transaction
           returning-stmt (assoc stmt :returning [:*])
           update-sql (format-and-coerce returning-stmt enum-val->int)
-          after-rows (execute-sql! conn update-sql builder-fn)
+          after-rows (execute-sql! write-tx update-sql builder-fn)
           after-by-pk (into {} (map (fn [row] [(get row pk-key) (into {} row)])) after-rows)
-          ;; All PKs involved
+          ;; Query the read transaction for before-values using the PKs from the update result
+          pks (vec (keys after-by-pk))
+          before-rows (when (seq pks)
+                        (let [select-stmt {:select [:*]
+                                           :from table-kw
+                                           :where [:in pk-key pks]}
+                              select-sql (format-and-coerce select-stmt enum-val->int)]
+                          (execute-sql! read-tx select-sql builder-fn)))
+          before-by-pk (into {} (map (fn [row] [(get row pk-key) (into {} row)])) before-rows)
           all-pks (distinct (concat (keys before-by-pk) (keys after-by-pk)))]
       (into []
        (mapcat
@@ -139,22 +137,30 @@
   "Execute a write statement within a transaction, generating a diff and checking
    authorization. Returns the diff if authorized.
 
+   Opens a read transaction on read-pool (to get a consistent snapshot of the
+   database before the write) and a write transaction on write-conn. For UPDATE
+   statements, the read transaction is used to query before-values using the
+   primary keys returned by the UPDATE's RETURNING clause.
+
    Parameters:
-   - conn: the write connection
-   - columns: the raw columns map (keyword -> props)
-   - authorize-fn: (fn [ctx diff] ...) — must return truthy to allow the write
-   - ctx: the system context map
+   - ctx: system context map containing :biff.sqlite/read-pool, :biff.sqlite/write-conn,
+          :biff.sqlite/columns, and :biff.sqlite/authorize
    - input: a HoneySQL map (INSERT, UPDATE, or DELETE)"
-  [conn columns authorize-fn ctx input]
-  (let [{:keys [builder-fn enum-val->int normalized-columns]} (coerce/memoized-coercions columns)]
+  [ctx input]
+  (let [{:biff.sqlite/keys [columns write-conn read-pool authorize]} ctx
+        columns (or columns {})
+        {:keys [builder-fn enum-val->int normalized-columns]} (coerce/memoized-coercions columns)]
     (validate/validate-honeysql-input! normalized-columns input)
     (let [stmt-type (classify-statement input)]
-      (jdbc/with-transaction [tx conn {:isolation :serializable}]
-        (let [diff (case stmt-type
-                     :insert (process-insert! tx input builder-fn enum-val->int)
-                     :delete (process-delete! tx input builder-fn enum-val->int)
-                     :update (process-update! tx input normalized-columns builder-fn enum-val->int))]
-          (when-not (authorize-fn ctx diff)
-            (throw (ex-info "Write rejected by authorization rules."
-                            {:diff diff})))
-          diff)))))
+      (jdbc/with-transaction [read-tx read-pool]
+        ;; Establish the read snapshot before opening the write transaction
+        (jdbc/execute! read-tx ["SELECT 1"])
+        (jdbc/with-transaction [write-tx write-conn {:isolation :serializable}]
+          (let [diff (case stmt-type
+                       :insert (process-insert! write-tx input builder-fn enum-val->int)
+                       :delete (process-delete! write-tx input builder-fn enum-val->int)
+                       :update (process-update! read-tx write-tx input normalized-columns builder-fn enum-val->int))]
+            (when-not (authorize ctx diff)
+              (throw (ex-info "Write rejected by authorization rules."
+                              {:diff diff})))
+            diff))))))

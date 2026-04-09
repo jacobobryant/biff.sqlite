@@ -76,6 +76,11 @@
    4. If authorize returns falsy, aborts the transaction and throws an exception.
    5. INSERT statements with :on-conflict are rejected (throw an exception).
 
+   Uses a separate read transaction on `:biff.sqlite/read-pool` to get a consistent
+   snapshot of the database before the write. For UPDATE statements, the read
+   transaction is queried for before-values using primary keys from the UPDATE's
+   RETURNING clause.
+
    The diff is a vector of maps:
      {:table  :user        ; table keyword
       :op     :create      ; :create, :update, or :delete
@@ -84,13 +89,11 @@
 
    Returns the diff vector on success."
   [ctx input]
-  (let [{:biff.sqlite/keys [columns write-conn authorize]} ctx
-        columns (or columns {})]
-    (when-not authorize
-      (throw (ex-info "authorized-write requires :biff.sqlite/authorize in ctx."
-                      {})))
-    (locking write-lock
-      (authorize/authorized-write! write-conn columns authorize ctx input))))
+  (when-not (:biff.sqlite/authorize ctx)
+    (throw (ex-info "authorized-write requires :biff.sqlite/authorize in ctx."
+                    {})))
+  (locking write-lock
+    (authorize/authorized-write! ctx input)))
 
 (defn use-litestream
   "Biff component for litestream replication. Downloads the litestream binary
