@@ -22,19 +22,34 @@
    :user/joined-at {:type :inst :required true}})
 
 (def ^:dynamic *conn* nil)
+(def ^:dynamic *read-pool* nil)
+(def ^:dynamic *write-conn* nil)
 
 (defn with-sqlite [f]
-  (with-open [conn (jdbc/get-connection "jdbc:sqlite::memory:")]
-    (jdbc/execute! conn ["CREATE TABLE user (id TEXT PRIMARY KEY, name TEXT NOT NULL, joined_at INT NOT NULL) STRICT"])
-    (jdbc/execute! conn ["INSERT INTO user (id, name, joined_at) VALUES (?, ?, ?)"
-                         "u1" "Alice" 1700000000000])
-    (binding [*conn* conn]
-      (f))))
+  (let [db-file (java.io.File/createTempFile "biff-sqlite-test" ".db")
+        db-path (.getAbsolutePath db-file)]
+    (.delete db-file)
+    (try
+      (with-open [write-conn (jdbc/get-connection (str "jdbc:sqlite:" db-path))
+                  read-conn (jdbc/get-connection (str "jdbc:sqlite:" db-path))]
+        (jdbc/execute! write-conn ["PRAGMA journal_mode=WAL"])
+        (jdbc/execute! read-conn ["PRAGMA journal_mode=WAL"])
+        (jdbc/execute! write-conn ["CREATE TABLE user (id TEXT PRIMARY KEY, name TEXT NOT NULL, joined_at INT NOT NULL) STRICT"])
+        (jdbc/execute! write-conn ["INSERT INTO user (id, name, joined_at) VALUES (?, ?, ?)"
+                                   "u1" "Alice" 1700000000000])
+        (binding [*conn* write-conn
+                  *write-conn* write-conn
+                  *read-pool* read-conn]
+          (f)))
+      (finally
+        (.delete (java.io.File. db-path))
+        (.delete (java.io.File. (str db-path "-wal")))
+        (.delete (java.io.File. (str db-path "-shm")))))))
 
 (use-fixtures :each with-sqlite)
 
 (deftest direct-column-coercion-test
-  (let [ctx {:biff.sqlite/read-pool *conn* :biff.sqlite/write-conn *conn*
+  (let [ctx {:biff.sqlite/read-pool *read-pool* :biff.sqlite/write-conn *write-conn*
              :biff.sqlite/columns test-columns}]
     (testing "direct column name matches coercion"
       (is (= [{:user/id "u1" :user/name "Alice" :user/joined-at (Instant/ofEpochMilli 1700000000000)}]
@@ -200,13 +215,13 @@
 
 (deftest execute-string-input-test
   (testing "execute accepts a bare SQL string"
-    (let [ctx {:biff.sqlite/read-pool *conn* :biff.sqlite/write-conn *conn*
+    (let [ctx {:biff.sqlite/read-pool *read-pool* :biff.sqlite/write-conn *write-conn*
                :biff.sqlite/columns test-columns}]
       (is (= [{:user/id "u1" :user/name "Alice" :user/joined-at (Instant/ofEpochMilli 1700000000000)}]
              (biff.sqlite/execute ctx "SELECT id, name, joined_at FROM user")))))
 
   (testing "execute accepts a HoneySQL map"
-    (let [ctx {:biff.sqlite/read-pool *conn* :biff.sqlite/write-conn *conn*
+    (let [ctx {:biff.sqlite/read-pool *read-pool* :biff.sqlite/write-conn *write-conn*
                :biff.sqlite/columns test-columns}]
       (is (= [{:user/id "u1"}]
              (biff.sqlite/execute ctx {:select :id :from :user}))))))
@@ -214,7 +229,7 @@
 ;; --- Namespaced alias tests ---
 
 (deftest namespaced-alias-honeysql-test
-  (let [ctx {:biff.sqlite/read-pool *conn* :biff.sqlite/write-conn *conn*
+  (let [ctx {:biff.sqlite/read-pool *read-pool* :biff.sqlite/write-conn *write-conn*
              :biff.sqlite/columns test-columns}]
     (testing "namespaced alias on column from same table produces correct key"
       (is (= [{:user/joined-at (Instant/ofEpochMilli 1700000000000)}]
@@ -256,7 +271,7 @@
       (is (str/includes? sql "\"user/age_years\"")))))
 
 (deftest namespaced-alias-raw-sql-test
-  (let [ctx {:biff.sqlite/read-pool *conn* :biff.sqlite/write-conn *conn*
+  (let [ctx {:biff.sqlite/read-pool *read-pool* :biff.sqlite/write-conn *write-conn*
              :biff.sqlite/columns test-columns}]
     (testing "raw SQL with quoted namespaced alias works"
       (let [results (biff.sqlite/execute ctx
@@ -270,7 +285,7 @@
     (let [columns {:user/id        {:type :text :primary-key true}
                    :user/name      {:type :text :required true}
                    :user/joined-at {:type :inst :required true}}
-          ctx {:biff.sqlite/read-pool *conn* :biff.sqlite/write-conn *conn*
+          ctx {:biff.sqlite/read-pool *read-pool* :biff.sqlite/write-conn *write-conn*
                :biff.sqlite/columns columns}]
       (is (thrown-with-msg?
            clojure.lang.ExceptionInfo #"Validation failed"
@@ -284,7 +299,7 @@
     (let [columns {:user/id        {:type :text :primary-key true}
                    :user/name      {:type :text :required true}
                    :user/joined-at {:type :inst :required true}}
-          ctx {:biff.sqlite/read-pool *conn* :biff.sqlite/write-conn *conn*
+          ctx {:biff.sqlite/read-pool *read-pool* :biff.sqlite/write-conn *write-conn*
                :biff.sqlite/columns columns}]
       ;; Should not throw
       (biff.sqlite/execute ctx {:insert-into :user
@@ -297,7 +312,7 @@
     (let [columns {:user/id        {:type :text :primary-key true}
                    :user/name      {:type :text :required true}
                    :user/joined-at {:type :inst :required true}}
-          ctx {:biff.sqlite/read-pool *conn* :biff.sqlite/write-conn *conn*
+          ctx {:biff.sqlite/read-pool *read-pool* :biff.sqlite/write-conn *write-conn*
                :biff.sqlite/columns columns}]
       (is (thrown-with-msg?
            clojure.lang.ExceptionInfo #"Validation failed"
@@ -310,7 +325,7 @@
     (let [columns {:user/id        {:type :text :primary-key true}
                    :user/name      {:type :text :required true}
                    :user/joined-at {:type :inst :required true}}
-          ctx {:biff.sqlite/read-pool *conn* :biff.sqlite/write-conn *conn*
+          ctx {:biff.sqlite/read-pool *read-pool* :biff.sqlite/write-conn *write-conn*
                :biff.sqlite/columns columns}]
       ;; vector values (not [:lift ...]) should be skipped - no validation exception
       (biff.sqlite/execute ctx {:update :user
@@ -323,7 +338,7 @@
                    :user/name      {:type :text :required true
                                     :schema [:re #"^[A-Z].*"]}
                    :user/joined-at {:type :inst :required true}}
-          ctx {:biff.sqlite/read-pool *conn* :biff.sqlite/write-conn *conn*
+          ctx {:biff.sqlite/read-pool *read-pool* :biff.sqlite/write-conn *write-conn*
                :biff.sqlite/columns columns}]
       ;; lowercase name should fail validation
       (is (thrown-with-msg?
@@ -343,7 +358,7 @@
     (let [columns {:user/id        {:type :text :primary-key true}
                    :user/name      {:type :text :required true}
                    :user/joined-at {:type :inst :required true}}
-          ctx {:biff.sqlite/read-pool *conn* :biff.sqlite/write-conn *conn*
+          ctx {:biff.sqlite/read-pool *read-pool* :biff.sqlite/write-conn *write-conn*
                :biff.sqlite/columns columns}]
       (is (thrown-with-msg?
            clojure.lang.ExceptionInfo #"Validation failed"
@@ -358,7 +373,7 @@
           _ (jdbc/execute! *conn* ["INSERT INTO item (id, note) VALUES (?, ?)" "i1" "hello"])
           columns {:item/id   {:type :text :primary-key true}
                    :item/note {:type :text}}
-          ctx {:biff.sqlite/read-pool *conn* :biff.sqlite/write-conn *conn*
+          ctx {:biff.sqlite/read-pool *read-pool* :biff.sqlite/write-conn *write-conn*
                :biff.sqlite/columns columns}]
       ;; nil should be valid for a non-required column
       (biff.sqlite/execute ctx {:update :item
@@ -414,8 +429,8 @@
     (jdbc/execute! *conn* ["CREATE TABLE post (id TEXT PRIMARY KEY, title TEXT NOT NULL, author_id TEXT NOT NULL, FOREIGN KEY(author_id) REFERENCES user(id)) STRICT"])
     (jdbc/execute! *conn* ["INSERT INTO post (id, title, author_id) VALUES (?, ?, ?)" "p1" "Hello" "u1"])
     (jdbc/execute! *conn* ["INSERT INTO post (id, title, author_id) VALUES (?, ?, ?)" "p2" "World" "u1"])
-    (let [ctx {:biff.sqlite/read-pool *conn*
-               :biff.sqlite/write-conn *conn*
+    (let [ctx {:biff.sqlite/read-pool *read-pool*
+               :biff.sqlite/write-conn *write-conn*
                :biff.sqlite/columns resolver-columns}
           resolvers (biff.sqlite/make-resolvers ctx)
           post-resolver (first (filter #(= :com.biffweb.sqlite/post-resolver (:id %)) resolvers))
@@ -430,8 +445,8 @@
 
 (deftest make-resolvers-missing-entity-test
   (testing "batch resolve returns empty map for missing entities"
-    (let [ctx {:biff.sqlite/read-pool *conn*
-               :biff.sqlite/write-conn *conn*
+    (let [ctx {:biff.sqlite/read-pool *read-pool*
+               :biff.sqlite/write-conn *write-conn*
                :biff.sqlite/columns resolver-columns}
           resolvers (biff.sqlite/make-resolvers ctx)
           user-resolver (first (filter #(= :com.biffweb.sqlite/user-resolver (:id %)) resolvers))
@@ -463,8 +478,8 @@
     (let [cols {:entry/id        {:type :text :primary-key true}
                 :entry/title     {:type :text}
                 :entry/author-id {:type :text :ref :user/id}}
-          ctx {:biff.sqlite/read-pool *conn*
-               :biff.sqlite/write-conn *conn*
+          ctx {:biff.sqlite/read-pool *read-pool*
+               :biff.sqlite/write-conn *write-conn*
                :biff.sqlite/columns cols}
           resolvers (biff.sqlite/make-resolvers ctx)
           r (first resolvers)
@@ -485,8 +500,8 @@
 
 (deftest authorized-write-insert-test
   (testing "insert generates :create diff entries"
-    (let [ctx {:biff.sqlite/read-pool *conn*
-               :biff.sqlite/write-conn *conn*
+    (let [ctx {:biff.sqlite/read-pool *read-pool*
+               :biff.sqlite/write-conn *write-conn*
                :biff.sqlite/columns test-columns
                :biff.sqlite/authorize allow-all}
           now (Instant/ofEpochMilli 1700000000000)
@@ -506,8 +521,8 @@
 
 (deftest authorized-write-insert-multiple-test
   (testing "insert with multiple values generates multiple :create diff entries"
-    (let [ctx {:biff.sqlite/read-pool *conn*
-               :biff.sqlite/write-conn *conn*
+    (let [ctx {:biff.sqlite/read-pool *read-pool*
+               :biff.sqlite/write-conn *write-conn*
                :biff.sqlite/columns test-columns
                :biff.sqlite/authorize allow-all}
           now (Instant/ofEpochMilli 1700000000000)
@@ -527,8 +542,8 @@
 
 (deftest authorized-write-delete-test
   (testing "delete generates :delete diff entries with :before values"
-    (let [ctx {:biff.sqlite/read-pool *conn*
-               :biff.sqlite/write-conn *conn*
+    (let [ctx {:biff.sqlite/read-pool *read-pool*
+               :biff.sqlite/write-conn *write-conn*
                :biff.sqlite/columns test-columns
                :biff.sqlite/authorize allow-all}
           diff (biff.sqlite/authorized-write
@@ -544,8 +559,8 @@
 
 (deftest authorized-write-delete-nonexistent-test
   (testing "delete of nonexistent record produces empty diff"
-    (let [ctx {:biff.sqlite/read-pool *conn*
-               :biff.sqlite/write-conn *conn*
+    (let [ctx {:biff.sqlite/read-pool *read-pool*
+               :biff.sqlite/write-conn *write-conn*
                :biff.sqlite/columns test-columns
                :biff.sqlite/authorize allow-all}
           diff (biff.sqlite/authorized-write
@@ -556,8 +571,8 @@
 
 (deftest authorized-write-update-test
   (testing "update generates :update diff with :before and :after"
-    (let [ctx {:biff.sqlite/read-pool *conn*
-               :biff.sqlite/write-conn *conn*
+    (let [ctx {:biff.sqlite/read-pool *read-pool*
+               :biff.sqlite/write-conn *write-conn*
                :biff.sqlite/columns test-columns
                :biff.sqlite/authorize allow-all}
           diff (biff.sqlite/authorized-write
@@ -575,8 +590,8 @@
 
 (deftest authorized-write-update-pk-change-test
   (testing "update that changes primary key throws an exception"
-    (let [ctx {:biff.sqlite/read-pool *conn*
-               :biff.sqlite/write-conn *conn*
+    (let [ctx {:biff.sqlite/read-pool *read-pool*
+               :biff.sqlite/write-conn *write-conn*
                :biff.sqlite/columns test-columns
                :biff.sqlite/authorize allow-all}]
       (is (thrown-with-msg?
@@ -589,8 +604,8 @@
 
 (deftest authorized-write-upsert-test
   (testing "insert with :on-conflict generates correct diff"
-    (let [ctx {:biff.sqlite/read-pool *conn*
-               :biff.sqlite/write-conn *conn*
+    (let [ctx {:biff.sqlite/read-pool *read-pool*
+               :biff.sqlite/write-conn *write-conn*
                :biff.sqlite/columns test-columns
                :biff.sqlite/authorize allow-all}
           ;; u1 already exists with name "Alice", so this should update
@@ -609,8 +624,8 @@
 
 (deftest authorized-write-upsert-new-record-test
   (testing "insert with :on-conflict creates new record when no conflict"
-    (let [ctx {:biff.sqlite/read-pool *conn*
-               :biff.sqlite/write-conn *conn*
+    (let [ctx {:biff.sqlite/read-pool *read-pool*
+               :biff.sqlite/write-conn *write-conn*
                :biff.sqlite/columns test-columns
                :biff.sqlite/authorize allow-all}
           diff (biff.sqlite/authorized-write
@@ -628,8 +643,8 @@
 
 (deftest authorized-write-upsert-pk-in-do-update-set-test
   (testing "upsert with primary key in :do-update-set throws"
-    (let [ctx {:biff.sqlite/read-pool *conn*
-               :biff.sqlite/write-conn *conn*
+    (let [ctx {:biff.sqlite/read-pool *read-pool*
+               :biff.sqlite/write-conn *write-conn*
                :biff.sqlite/columns test-columns
                :biff.sqlite/authorize allow-all}]
       (is (thrown-with-msg?
@@ -645,8 +660,8 @@
 
 (deftest authorized-write-rejects-replace-into-test
   (testing "replace-into throws"
-    (let [ctx {:biff.sqlite/read-pool *conn*
-               :biff.sqlite/write-conn *conn*
+    (let [ctx {:biff.sqlite/read-pool *read-pool*
+               :biff.sqlite/write-conn *write-conn*
                :biff.sqlite/columns test-columns
                :biff.sqlite/authorize allow-all}]
       (is (thrown-with-msg?
@@ -660,8 +675,8 @@
 
 (deftest authorized-write-update-set-must-be-map-test
   (testing "update with non-map :set throws"
-    (let [ctx {:biff.sqlite/read-pool *conn*
-               :biff.sqlite/write-conn *conn*
+    (let [ctx {:biff.sqlite/read-pool *read-pool*
+               :biff.sqlite/write-conn *write-conn*
                :biff.sqlite/columns test-columns
                :biff.sqlite/authorize allow-all}]
       (is (thrown-with-msg?
@@ -674,8 +689,8 @@
 
 (deftest authorized-write-denied-test
   (testing "when authorize returns false, transaction is rolled back"
-    (let [ctx {:biff.sqlite/read-pool *conn*
-               :biff.sqlite/write-conn *conn*
+    (let [ctx {:biff.sqlite/read-pool *read-pool*
+               :biff.sqlite/write-conn *write-conn*
                :biff.sqlite/columns test-columns
                :biff.sqlite/authorize deny-all}]
       (is (thrown-with-msg?
@@ -687,8 +702,8 @@
                        :user/name "Bob"
                        :user/joined-at (Instant/ofEpochMilli 1700000000000)}]})))
       ;; Verify the insert was rolled back
-      (let [read-ctx {:biff.sqlite/read-pool *conn*
-                      :biff.sqlite/write-conn *conn*
+      (let [read-ctx {:biff.sqlite/read-pool *read-pool*
+                      :biff.sqlite/write-conn *write-conn*
                       :biff.sqlite/columns test-columns}
             results (biff.sqlite/execute read-ctx {:select :* :from :user})]
         (is (= 1 (count results)))
@@ -696,8 +711,8 @@
 
 (deftest authorized-write-denied-update-rollback-test
   (testing "denied update is rolled back"
-    (let [ctx {:biff.sqlite/read-pool *conn*
-               :biff.sqlite/write-conn *conn*
+    (let [ctx {:biff.sqlite/read-pool *read-pool*
+               :biff.sqlite/write-conn *write-conn*
                :biff.sqlite/columns test-columns
                :biff.sqlite/authorize deny-all}]
       (is (thrown-with-msg?
@@ -708,16 +723,16 @@
              :set {:user/name "Hacker"}
              :where [:= :user/id "u1"]})))
       ;; Verify the update was rolled back
-      (let [read-ctx {:biff.sqlite/read-pool *conn*
-                      :biff.sqlite/write-conn *conn*
+      (let [read-ctx {:biff.sqlite/read-pool *read-pool*
+                      :biff.sqlite/write-conn *write-conn*
                       :biff.sqlite/columns test-columns}
             results (biff.sqlite/execute read-ctx {:select :* :from :user})]
         (is (= "Alice" (:user/name (first results))))))))
 
 (deftest authorized-write-denied-delete-rollback-test
   (testing "denied delete is rolled back"
-    (let [ctx {:biff.sqlite/read-pool *conn*
-               :biff.sqlite/write-conn *conn*
+    (let [ctx {:biff.sqlite/read-pool *read-pool*
+               :biff.sqlite/write-conn *write-conn*
                :biff.sqlite/columns test-columns
                :biff.sqlite/authorize deny-all}]
       (is (thrown-with-msg?
@@ -727,16 +742,16 @@
             {:delete-from :user
              :where [:= :user/id "u1"]})))
       ;; Verify the delete was rolled back
-      (let [read-ctx {:biff.sqlite/read-pool *conn*
-                      :biff.sqlite/write-conn *conn*
+      (let [read-ctx {:biff.sqlite/read-pool *read-pool*
+                      :biff.sqlite/write-conn *write-conn*
                       :biff.sqlite/columns test-columns}
             results (biff.sqlite/execute read-ctx {:select :* :from :user})]
         (is (= 1 (count results)))))))
 
 (deftest authorized-write-missing-authorize-fn-test
   (testing "throws when :biff.sqlite/authorize is missing from ctx"
-    (let [ctx {:biff.sqlite/read-pool *conn*
-               :biff.sqlite/write-conn *conn*
+    (let [ctx {:biff.sqlite/read-pool *read-pool*
+               :biff.sqlite/write-conn *write-conn*
                :biff.sqlite/columns test-columns}]
       (is (thrown-with-msg?
            clojure.lang.ExceptionInfo #"requires :biff.sqlite/authorize"
@@ -749,8 +764,8 @@
 
 (deftest authorized-write-rejects-select-test
   (testing "throws when given a SELECT statement"
-    (let [ctx {:biff.sqlite/read-pool *conn*
-               :biff.sqlite/write-conn *conn*
+    (let [ctx {:biff.sqlite/read-pool *read-pool*
+               :biff.sqlite/write-conn *write-conn*
                :biff.sqlite/columns test-columns
                :biff.sqlite/authorize allow-all}]
       (is (thrown-with-msg?
@@ -761,8 +776,8 @@
 
 (deftest authorized-write-rejects-raw-sql-test
   (testing "throws when given a raw SQL string"
-    (let [ctx {:biff.sqlite/read-pool *conn*
-               :biff.sqlite/write-conn *conn*
+    (let [ctx {:biff.sqlite/read-pool *read-pool*
+               :biff.sqlite/write-conn *write-conn*
                :biff.sqlite/columns test-columns
                :biff.sqlite/authorize allow-all}]
       (is (thrown-with-msg?
@@ -774,8 +789,8 @@
 (deftest authorized-write-authorize-receives-ctx-test
   (testing "authorize fn receives ctx with before-conn and after-conn"
     (let [received (atom nil)
-          ctx {:biff.sqlite/read-pool *conn*
-               :biff.sqlite/write-conn *conn*
+          ctx {:biff.sqlite/read-pool *read-pool*
+               :biff.sqlite/write-conn *write-conn*
                :biff.sqlite/columns test-columns
                :biff.sqlite/authorize (fn [ctx diff]
                                         (reset! received {:ctx-keys (set (keys ctx))
@@ -798,8 +813,8 @@
 
 (deftest authorized-write-yakread-update-settings-test
   (testing "update user settings (yakread pattern)"
-    (let [ctx {:biff.sqlite/read-pool *conn*
-               :biff.sqlite/write-conn *conn*
+    (let [ctx {:biff.sqlite/read-pool *read-pool*
+               :biff.sqlite/write-conn *write-conn*
                :biff.sqlite/columns test-columns
                :biff.sqlite/authorize allow-all}
           diff (biff.sqlite/authorized-write
@@ -820,8 +835,8 @@
     (jdbc/execute! *conn* ["INSERT INTO item (id, label) VALUES (?, ?)" "i3" "Three"])
     (let [columns {:item/id    {:type :text :primary-key true}
                    :item/label {:type :text}}
-          ctx {:biff.sqlite/read-pool *conn*
-               :biff.sqlite/write-conn *conn*
+          ctx {:biff.sqlite/read-pool *read-pool*
+               :biff.sqlite/write-conn *write-conn*
                :biff.sqlite/columns columns
                :biff.sqlite/authorize allow-all}
           diff (biff.sqlite/authorized-write
@@ -838,8 +853,8 @@
     (let [columns {:card/id        {:type :text :primary-key true}
                    :card/card-name {:type :text :required true}
                    :card/user-id   {:type :text :required true}}
-          ctx {:biff.sqlite/read-pool *conn*
-               :biff.sqlite/write-conn *conn*
+          ctx {:biff.sqlite/read-pool *read-pool*
+               :biff.sqlite/write-conn *write-conn*
                :biff.sqlite/columns columns
                :biff.sqlite/authorize allow-all}
           diff (biff.sqlite/authorized-write
@@ -862,8 +877,8 @@
     (jdbc/execute! *conn* ["INSERT INTO log (message, level) VALUES (?, ?)" "hello" "info"])
     (let [columns {:log/message {:type :text}
                    :log/level   {:type :text}}
-          ctx {:biff.sqlite/read-pool *conn*
-               :biff.sqlite/write-conn *conn*
+          ctx {:biff.sqlite/read-pool *read-pool*
+               :biff.sqlite/write-conn *write-conn*
                :biff.sqlite/columns columns
                :biff.sqlite/authorize allow-all}]
       (is (thrown-with-msg?
@@ -879,8 +894,8 @@
     (let [;; Only allow creating users, not deleting them
           authorize-fn (fn [_ctx diff]
                          (every? #(= :create (:op %)) diff))
-          ctx {:biff.sqlite/read-pool *conn*
-               :biff.sqlite/write-conn *conn*
+          ctx {:biff.sqlite/read-pool *read-pool*
+               :biff.sqlite/write-conn *write-conn*
                :biff.sqlite/columns test-columns
                :biff.sqlite/authorize authorize-fn}]
       ;; Insert should succeed

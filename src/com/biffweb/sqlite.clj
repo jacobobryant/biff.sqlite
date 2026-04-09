@@ -80,6 +80,11 @@
       {:biff.sqlite/before-conn :biff.sqlite/read-pool}) ...)`.
    4. If authorize returns falsy, aborts the transaction and throws an exception.
 
+   Uses a separate read transaction on `:biff.sqlite/read-pool` to get a consistent
+   snapshot of the database before the write. For UPDATE and upsert statements, the
+   write is executed first with RETURNING *, then the read transaction is queried for
+   the before-values using the returned primary keys.
+
    The diff is a vector of maps:
      {:table  :user        ; table keyword
       :op     :create      ; :create, :update, or :delete

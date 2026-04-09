@@ -2,7 +2,6 @@
   "Internal implementation for authorized write transactions.
    Generates diff data structures and manages transaction rollback."
   (:require [com.biffweb.sqlite.impl.coerce :as coerce]
-            [com.biffweb.sqlite.impl.query :as query]
             [com.biffweb.sqlite.impl.util :as util]
             [com.biffweb.sqlite.impl.validate :as validate]
             [honey.sql :as hsql]
@@ -72,50 +71,30 @@
 
 (defn- process-update!
   "Process an UPDATE or INSERT...ON CONFLICT statement:
-   1. Execute the write statement with :returning :* to get after-values
+   1. Execute the write statement with :returning :* on write-tx to get after-values
    2. Extract primary keys from the results
-   3. Query before-conn for the original records
+   3. Query read-tx for the original records using those primary keys
    4. Pair before/after by primary key to generate diff entries"
-  [write-tx before-tx stmt normalized-columns builder-fn enum-val->int]
+  [read-tx write-tx stmt normalized-columns builder-fn enum-val->int]
   (let [table-kw (extract-table stmt)
         pk-key (find-primary-key normalized-columns table-kw)]
     (when-not pk-key
       (throw (ex-info "authorized-write requires a primary key for UPDATE/upsert statements."
                       {:table table-kw})))
-    (let [;; Query before-conn for original records using the primary keys
-          ;; We need to get the before state BEFORE executing the write
-          before-pks (when (:update stmt)
-                       (let [select-stmt (cond-> {:select [pk-key]
-                                                  :from table-kw
-                                                  :where (:where stmt)}
-                                           (:order-by stmt) (assoc :order-by (:order-by stmt))
-                                           (:limit stmt) (assoc :limit (:limit stmt)))
-                             select-sql (format-and-coerce select-stmt enum-val->int)]
-                         (mapv #(get % pk-key) (execute-sql! write-tx select-sql builder-fn))))
-          ;; For INSERT...ON CONFLICT, get the PKs from the values being inserted
-          before-pks (or before-pks
-                        (when (:insert-into stmt)
-                          (let [pk-name (name pk-key)
-                                pk-col-kw (keyword (name table-kw) pk-name)]
-                            (->> (:values stmt)
-                                 (map #(get % pk-col-kw))
-                                 (filter some?)
-                                 vec))))
-          ;; Query before-conn for original records
-          before-rows (when (seq before-pks)
-                        (execute-sql! before-tx
-                                      (format-and-coerce {:select [:*]
-                                                          :from table-kw
-                                                          :where [:in pk-key before-pks]}
-                                                         enum-val->int)
-                                      builder-fn))
-          before-by-pk (into {} (map (fn [row] [(get row pk-key) (into {} row)])) before-rows)
-          ;; Execute the actual write with :returning :*
+    (let [;; Execute the write with :returning :* on the write transaction
           returning-stmt (assoc stmt :returning [:*])
           write-sql (format-and-coerce returning-stmt enum-val->int)
           after-rows (execute-sql! write-tx write-sql builder-fn)
           after-by-pk (into {} (map (fn [row] [(get row pk-key) (into {} row)])) after-rows)
-          ;; All PKs involved
+          ;; Query the read transaction for before-values using the PKs from the write result
+          pks (vec (keys after-by-pk))
+          before-rows (when (seq pks)
+                        (let [select-stmt {:select [:*]
+                                           :from table-kw
+                                           :where [:in pk-key pks]}
+                              select-sql (format-and-coerce select-stmt enum-val->int)]
+                          (execute-sql! read-tx select-sql builder-fn)))
+          before-by-pk (into {} (map (fn [row] [(get row pk-key) (into {} row)])) before-rows)
           all-pks (distinct (concat (keys before-by-pk) (keys after-by-pk)))]
       (into []
        (mapcat
@@ -215,11 +194,13 @@
       (validate-no-pk-changes! input stmt-type normalized-columns)
       (validate/validate-honeysql-input! normalized-columns input)
       (jdbc/with-transaction [read-tx read-pool]
+        ;; Establish the read snapshot before opening the write transaction
+        (jdbc/execute! read-tx ["SELECT 1"])
         (jdbc/with-transaction [write-tx write-conn {:isolation :serializable}]
           (let [diff (case stmt-type
                        :insert (process-insert! write-tx input builder-fn enum-val->int)
                        :delete (process-delete! write-tx input builder-fn enum-val->int)
-                       (:update :upsert) (process-update! write-tx read-tx input normalized-columns builder-fn enum-val->int))
+                       (:update :upsert) (process-update! read-tx write-tx input normalized-columns builder-fn enum-val->int))
                 auth-ctx (assoc ctx
                                 :biff.sqlite/before-conn read-tx
                                 :biff.sqlite/after-conn write-tx)]
