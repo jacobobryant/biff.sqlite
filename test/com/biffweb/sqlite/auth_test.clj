@@ -35,7 +35,7 @@
                              "email TEXT NOT NULL UNIQUE, "
                              "code TEXT NOT NULL, "
                              "created_at INT NOT NULL, "
-                             "failed_attempts INT, "
+                             "failed_attempts INT NOT NULL, "
                              "params TEXT"
                              ") STRICT")])
         (let [columns (merge {:user/id {:type :uuid :primary-key true}
@@ -45,7 +45,7 @@
               ctx {:biff.sqlite/read-pool read-conn
                    :biff.sqlite/write-conn write-conn
                    :biff.sqlite/columns columns}
-              db-fns (auth-impl/make-db-fns biff.sqlite/execute)]
+              db-fns auth-impl/db-fns]
           (binding [*ctx* ctx
                     *db-fns* db-fns]
             (f))))
@@ -59,7 +59,7 @@
 ;; --- auth-module structure tests ---
 
 (deftest auth-module-returns-routes-test
-  (let [module (biff.sqlite/auth-module {})]
+  (let [module (biff.sqlite/auth-module {:biff.auth/app-name "Test App"})]
     (testing "module has :routes"
       (is (some? (:routes module))))
     (testing "module has :biff.sqlite/columns"
@@ -101,6 +101,7 @@
        {:biff-auth-signin/email email
         :biff-auth-signin/code "123456"
         :biff-auth-signin/created-at now
+        :biff-auth-signin/failed-attempts 0
         :biff-auth-signin/params "{}"})
 
       ;; get
@@ -135,6 +136,7 @@
        {:biff-auth-signin/email email
         :biff-auth-signin/code "111111"
         :biff-auth-signin/created-at now
+        :biff-auth-signin/failed-attempts 0
         :biff-auth-signin/params nil})
 
       ;; increment to verify reset on upsert
@@ -147,6 +149,7 @@
        {:biff-auth-signin/email email
         :biff-auth-signin/code "222222"
         :biff-auth-signin/created-at later
+        :biff-auth-signin/failed-attempts 0
         :biff-auth-signin/params nil})
 
       (let [record (get-signin *ctx* email)]

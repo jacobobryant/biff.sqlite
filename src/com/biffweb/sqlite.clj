@@ -15,21 +15,14 @@
    [com.biffweb.authenticate :as biff.auth]
    [com.biffweb.sqlite.impl.auth :as auth-impl]
    [com.biffweb.sqlite.impl.authorize :as authorize]
-   [com.biffweb.sqlite.impl.coerce :as coerce]
+   [com.biffweb.sqlite.impl.execute :as exec]
    [com.biffweb.sqlite.impl.litestream :as litestream]
    [com.biffweb.sqlite.impl.pool :as pool]
-   [com.biffweb.sqlite.impl.query :as query]
    [com.biffweb.sqlite.impl.schema :as schema]
    [com.biffweb.sqlite.impl.sqlite3def :as sqlite3def]
-   [com.biffweb.sqlite.impl.util :as util]
-   [com.biffweb.sqlite.impl.validate :as validate]
-   [honey.sql :as hsql]
-   [next.jdbc :as jdbc]))
+   [com.biffweb.sqlite.impl.util :as util]))
 
-(def ^:private write-lock (Object.))
-
-(defn generate-schema-sql
-  "Generate the complete schema SQL string from column definitions.
+(defn generate-schema-sql  "Generate the complete schema SQL string from column definitions.
    Takes a map with :biff.sqlite/columns (map of column-id → column-props)
    and optional :biff.sqlite/extra-sql (vector of SQL strings).
    Returns the full SQL string."
@@ -51,22 +44,7 @@
    For INSERT/UPDATE HoneySQL maps, literal values in `:set` and `:values` are
    validated against column schemas before execution."
   [ctx input]
-  (let [{:biff.sqlite/keys [columns read-pool write-conn]} ctx
-        columns (or columns {})
-        {:keys [builder-fn enum-val->int normalized-columns]} (coerce/memoized-coercions columns)
-        _ (validate/validate-honeysql-input! normalized-columns input)
-        input (if (and (map? input) (:select input))
-                (update input :select query/preprocess-select)
-                input)
-        sql-vec (cond
-                  (map? input) (hsql/format input)
-                  (string? input) [input]
-                  :else input)
-        sql-vec (into [(first sql-vec)] (coerce/coerce-params enum-val->int (rest sql-vec)))
-        opts {:builder-fn builder-fn}]
-    (if (util/write-statement? (first sql-vec))
-      (locking write-lock (jdbc/execute! write-conn sql-vec opts))
-      (jdbc/execute! read-pool sql-vec opts))))
+  (exec/execute ctx input))
 
 (defn authorized-write
   "Execute an INSERT, UPDATE, or DELETE statement with authorization checks.
@@ -99,7 +77,7 @@
   (when-not (:biff.sqlite/authorize ctx)
     (throw (ex-info "authorized-write requires :biff.sqlite/authorize in ctx."
                     {})))
-  (locking write-lock
+  (locking exec/write-lock
     (authorize/authorized-write! ctx input)))
 
 (defn use-litestream
@@ -251,6 +229,5 @@
    You may override :biff.auth/create-user! if you need custom user creation
    logic (e.g. setting additional fields on the user record)."
   [options]
-  (let [db-fns (auth-impl/make-db-fns execute)
-        module (biff.auth/module (merge db-fns options))]
+  (let [module (biff.auth/module (merge auth-impl/db-fns options))]
     (assoc module :biff.sqlite/columns auth-impl/auth-signin-columns)))
