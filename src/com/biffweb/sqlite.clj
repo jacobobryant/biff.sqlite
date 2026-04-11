@@ -7,10 +7,12 @@
    - `authorized-write`    — Execute INSERT/UPDATE/DELETE with authorization checks.
    - `use-litestream`      — Biff component for litestream replication (called by use-sqlite automatically).
    - `generate-schema-sql` — Generate the complete schema SQL string from column definitions.
-   - `make-resolvers`      — Create biff.inject resolvers for SQLite tables from column definitions."
+   - `make-resolvers`      — Create biff.inject resolvers for SQLite tables from column definitions.
+   - `auth-module`         — Creates an authentication module backed by SQLite."
   (:require
    [clojure.string :as str]
    [clojure.tools.logging :as log]
+   [com.biffweb.authenticate :as biff.auth]
    [com.biffweb.sqlite.impl.authorize :as authorize]
    [com.biffweb.sqlite.impl.coerce :as coerce]
    [com.biffweb.sqlite.impl.litestream :as litestream]
@@ -221,3 +223,92 @@
                      (mapv (fn [input]
                              (get id->result (get input pk-key) {}))
                            inputs)))}))))
+
+;; =============================================================================
+;; Auth module
+;; =============================================================================
+
+(def ^:private auth-signin-columns
+  "Column definitions for the biff-auth-signin table used by biff.authenticate."
+  {:biff-auth-signin/email           {:type :text :primary-key true}
+   :biff-auth-signin/code            {:type :text :required true}
+   :biff-auth-signin/created-at      {:type :inst :required true}
+   :biff-auth-signin/failed-attempts {:type :int}
+   :biff-auth-signin/params          {:type :text}})
+
+(defn- sqlite-get-user-id [ctx email]
+  (let [rows (execute ctx {:select [:user/id]
+                           :from :user
+                           :where [:= :user/email email]})]
+    (:user/id (first rows))))
+
+(defn- sqlite-create-user! [ctx {:keys [email params]}]
+  (let [id (random-uuid)
+        now (java.time.Instant/now)]
+    (execute ctx {:insert-into :user
+                  :values [{:user/id id
+                            :user/email email
+                            :user/joined-at now}]})
+    id))
+
+(defn- sqlite-upsert-signin! [ctx record]
+  (execute ctx {:insert-into :biff-auth-signin
+                :values [{:biff-auth-signin/email (:biff-auth-signin/email record)
+                          :biff-auth-signin/code (:biff-auth-signin/code record)
+                          :biff-auth-signin/created-at (:biff-auth-signin/created-at record)
+                          :biff-auth-signin/failed-attempts 0
+                          :biff-auth-signin/params (:biff-auth-signin/params record)}]
+                :on-conflict [:biff-auth-signin/email]
+                :do-update-set [:biff-auth-signin/code
+                                :biff-auth-signin/created-at
+                                :biff-auth-signin/failed-attempts
+                                :biff-auth-signin/params]})
+  nil)
+
+(defn- sqlite-get-signin [ctx email]
+  (first (execute ctx {:select :*
+                       :from :biff-auth-signin
+                       :where [:= :biff-auth-signin/email email]})))
+
+(defn- sqlite-delete-signin! [ctx email]
+  (execute ctx {:delete-from :biff-auth-signin
+                :where [:= :biff-auth-signin/email email]})
+  nil)
+
+(defn- sqlite-increment-failed-attempts! [ctx email]
+  (execute ctx {:update :biff-auth-signin
+                :set {:biff-auth-signin/failed-attempts
+                      [:+ :biff-auth-signin/failed-attempts 1]}
+                :where [:= :biff-auth-signin/email email]})
+  nil)
+
+(defn auth-module
+  "Creates an authentication module backed by SQLite.
+
+   Wraps `com.biffweb.authenticate/module` with SQLite-backed implementations
+   for the DB store keys. Returns a map with :routes and :biff.sqlite/columns.
+
+   The :biff.sqlite/columns value contains the schema for the biff-auth-signin
+   table. Merge it into your app's column definitions.
+
+   Usage:
+     (auth-module
+       (merge {:biff.auth/app-path \"/app\"
+               :biff.auth/send-email (fn [ctx params] ...)}
+              biff.auth/turnstile-config))
+
+   All options from `com.biffweb.authenticate/module` are supported. The DB
+   store keys (:biff.auth/get-user-id, :biff.auth/create-user!, etc.) are
+   provided automatically — you don't need to supply them.
+
+   You may override :biff.auth/create-user! if you need custom user creation
+   logic (e.g. setting additional fields on the user record)."
+  [options]
+  (let [db-fns {:biff.auth/get-user-id              sqlite-get-user-id
+                :biff.auth/create-user!              sqlite-create-user!
+                :biff.auth/upsert-signin!            sqlite-upsert-signin!
+                :biff.auth/get-signin                sqlite-get-signin
+                :biff.auth/delete-signin!            sqlite-delete-signin!
+                :biff.auth/increment-failed-attempts! sqlite-increment-failed-attempts!}
+        module (biff.auth/module (merge db-fns options))]
+    (assoc module :biff.sqlite/columns auth-signin-columns)))
