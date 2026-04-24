@@ -1,5 +1,7 @@
 # biff.sqlite
 
+NOTE: not officially released yet. AI-generated. See https://biffweb.com/p/biff2/
+
 A SQLite integration library for [Biff](https://biffweb.com). Provides connection pooling, declarative schema migrations, automatic type coercion, input validation, [Litestream](https://litestream.io/) replication, and [sqlite3def](https://github.com/sqldef/sqldef) migration support.
 
 ## Installation
