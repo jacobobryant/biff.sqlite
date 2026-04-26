@@ -22,10 +22,12 @@
    [taoensso.nippy :as nippy]))
 
 (def ^:private kv-columns
-  {:biff-sqlite-kv/namespace {:type :text
-                              :primary-key-with [:biff-sqlite-kv/key]}
-   :biff-sqlite-kv/key {:type :text}
-   :biff-sqlite-kv/value {:type :blob :required true}})
+  {:biff-sqlite-kv/id {:type :uuid :primary-key true}
+   :biff-sqlite-kv/namespace {:type :text
+                              :required true
+                              :unique-with [:biff-sqlite-kv/key-]}
+   :biff-sqlite-kv/key- {:type :text :required true}
+   :biff-sqlite-kv/value- {:type :blob :required true}})
 
 (defn- validate-kv-args [namespace key]
   (assert (qualified-keyword? namespace) "namespace must be a qualified keyword")
@@ -40,20 +42,23 @@
                          key])
       nil)
     (let [value* (nippy/fast-freeze value)]
-      (exec/execute ctx [(str "INSERT INTO biff_sqlite_kv (namespace, key_, value_) VALUES (?, ?, ?) "
-                              "ON CONFLICT(namespace, key_) DO UPDATE SET value_ = excluded.value_")
-                         (str namespace)
-                         key
-                         value*])
+      (exec/execute ctx {:insert-into :biff-sqlite-kv
+                         :values [{:biff-sqlite-kv/id (random-uuid)
+                                   :biff-sqlite-kv/namespace (str namespace)
+                                   :biff-sqlite-kv/key- key
+                                   :biff-sqlite-kv/value- value*}]
+                         :on-conflict [:biff-sqlite-kv/namespace :biff-sqlite-kv/key-]
+                         :do-update-set {:biff-sqlite-kv/value- value*}})
       nil)))
 
 (defn- get-kv-value [ctx namespace key]
   (validate-kv-args namespace key)
-  (some-> (first (exec/execute ctx [(str "SELECT value_ AS \"biff_sqlite_kv/value\" "
-                                         "FROM biff_sqlite_kv WHERE namespace = ? AND key_ = ?")
-                                    (str namespace)
-                                    key]))
-          :biff-sqlite-kv/value
+  (some-> (first (exec/execute ctx {:select [:biff-sqlite-kv/value-]
+                                    :from :biff-sqlite-kv
+                                    :where [:and
+                                            [:= :biff-sqlite-kv/namespace (str namespace)]
+                                            [:= :biff-sqlite-kv/key- key]]}))
+          :biff-sqlite-kv/value-
           nippy/fast-thaw))
 
 (defn generate-schema-sql  "Generate the complete schema SQL string from column definitions.
@@ -145,7 +150,6 @@
      :primary-key  - boolean, adds PRIMARY KEY (implies :required)
      :unique       - boolean, adds UNIQUE constraint
      :unique-with  - vector of column keywords, adds compound UNIQUE constraint
-     :primary-key-with - vector of column keywords, adds compound PRIMARY KEY constraint
      :required     - boolean, adds NOT NULL
      :ref          - column keyword, adds FOREIGN KEY
      :index        - boolean, adds CREATE INDEX
@@ -186,82 +190,58 @@
    Returns a vector of resolver maps compatible with com.biffweb.inject/build-index.
 
    Each resolver:
-   - Takes the table's primary key column(s) as input
+   - Takes the table's primary key as input
    - Returns all other columns as output (batch resolver)
    - For ref columns ending in -id, adds a join key without the -id suffix
-     e.g. :post/author-id #uuid \"...\" → :post/author {:user/id #uuid \"...\"}"
+      e.g. :post/author-id #uuid \"...\" → :post/author {:user/id #uuid \"...\"}"
   [{:biff.sqlite/keys [columns]}]
   (let [columns (or columns {})
         by-table (group-by (comp keyword namespace key) columns)]
     (vec
      (for [[table-key table-cols] by-table
            :let [table-cols-map (into {} table-cols)
-                  pk-keys (or (seq (keep (fn [[col-key props]]
-                                           (when (:primary-key props)
-                                             col-key))
-                                         table-cols-map))
-                              (some (fn [[col-key props]]
-                                      (when-let [others (:primary-key-with props)]
-                                        (into [col-key] others)))
-                                    table-cols-map))
-                  _ (when-not pk-keys
-                      (throw (ex-info (str "No primary key found for table " table-key)
-                                      {:table table-key})))
-                  pk-keys (vec pk-keys)
-                  non-pk-cols (apply dissoc table-cols-map pk-keys)
-                   ;; Ref columns whose name ends in -id: {col-key ref-target-key}
-                   ref-cols (into {}
-                                  (keep (fn [[col-key props]]
-                                        (when (and (:ref props)
-                                                   (str/ends-with? (name col-key) "-id"))
-                                          [col-key (:ref props)])))
-                                non-pk-cols)
+                 pk-entry (first (filter (fn [[_ props]] (:primary-key props)) table-cols-map))
+                   _ (when-not pk-entry
+                       (throw (ex-info (str "No primary key found for table " table-key)
+                                       {:table table-key})))
+                 pk-key (key pk-entry)
+                   non-pk-cols (dissoc table-cols-map pk-key)
+                    ;; Ref columns whose name ends in -id: {col-key ref-target-key}
+                    ref-cols (into {}
+                                   (keep (fn [[col-key props]]
+                                         (when (and (:ref props)
+                                                    (str/ends-with? (name col-key) "-id"))
+                                           [col-key (:ref props)])))
+                                 non-pk-cols)
                    ;; Precomputed join mappings: [{:join-key, :col-key, :ref-key}]
                    join-mappings (mapv (fn [[col-key ref-key]]
                                         {:join-key (strip-id-suffix col-key)
                                          :col-key col-key
                                         :ref-key ref-key})
                                      ref-cols)
-                  output (vec (concat (keys non-pk-cols) (map :join-key join-mappings)))
-                  row->pk (fn [row]
-                            (if (= 1 (count pk-keys))
-                              (get row (first pk-keys))
-                              (mapv row pk-keys)))
-                  resolver-id (keyword "com.biffweb.sqlite"
-                                       (str (name table-key) "-resolver"))]]
-        {:id resolver-id
-         :input pk-keys
-         :output output
-         :batch true
-         :resolve (fn [ctx inputs]
-                    (let [where-clause (when (seq inputs)
-                                         (if (= 1 (count pk-keys))
-                                           [:in (first pk-keys) (mapv #(get % (first pk-keys)) inputs)]
-                                           (into [:or]
-                                                 (map (fn [input]
-                                                        (into [:and]
-                                                              (map (fn [pk-key]
-                                                                     [:= pk-key (get input pk-key)])
-                                                                   pk-keys))))
-                                                 inputs)))
-                          results (if where-clause
-                                    (execute ctx {:select :*
-                                                  :from table-key
-                                                  :where where-clause})
-                                    [])
-                          process-row (fn [row]
-                                        (let [row (apply dissoc row pk-keys)
-                                              row (reduce
-                                                   (fn [row {:keys [join-key col-key ref-key]}]
-                                                     (let [ref-val (get row col-key)]
-                                                       (cond-> row
-                                                         (some? ref-val) (assoc join-key {ref-key ref-val}))))
-                                                   row
-                                                   join-mappings)]
-                                          (into {} (filter (fn [[_ v]] (some? v))) row)))
-                          id->result (into {} (map (fn [row]
-                                                     [(row->pk row) (process-row row)]))
-                                            results)]
-                      (mapv (fn [input]
-                              (get id->result (row->pk input) {}))
-                            inputs)))}))))
+                   output (vec (concat (keys non-pk-cols) (map :join-key join-mappings)))
+                   resolver-id (keyword "com.biffweb.sqlite"
+                                        (str (name table-key) "-resolver"))]]
+         {:id resolver-id
+          :input [pk-key]
+          :output output
+          :batch true
+          :resolve (fn [ctx inputs]
+                     (let [ids (mapv pk-key inputs)
+                           results (execute ctx {:select :*
+                                                 :from table-key
+                                                 :where [:in pk-key ids]})
+                           process-row (fn [row]
+                                         (let [row (dissoc row pk-key)
+                                               row (reduce
+                                                    (fn [row {:keys [join-key col-key ref-key]}]
+                                                      (let [ref-val (get row col-key)]
+                                                        (cond-> row
+                                                          (some? ref-val) (assoc join-key {ref-key ref-val}))))
+                                                    row
+                                                    join-mappings)]
+                                           (into {} (filter (fn [[_ v]] (some? v))) row)))
+                           id->result (into {} (map (juxt pk-key process-row)) results)]
+                       (mapv (fn [input]
+                               (get id->result (get input pk-key) {}))
+                             inputs)))}))))

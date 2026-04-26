@@ -6,14 +6,8 @@
             [clojure.tools.logging :as log]
             [com.biffweb.sqlite.impl.util :as util]))
 
-(defn- ddl-col-name [col-id]
-  (case col-id
-    :biff-sqlite-kv/key "key_"
-    :biff-sqlite-kv/value "value_"
-    (util/col-col-name col-id)))
-
 (defn- generate-column-def [col]
-  (let [col-name (ddl-col-name (:id col))
+  (let [col-name (util/col-col-name (:id col))
         col-type (util/sqlite-type (:type col))
         enum-map (:enum-values col)
         check (when enum-map
@@ -30,29 +24,22 @@
      :comment comment}))
 
 (defn- generate-table-constraints [table-cols]
-  (let [primary-key-with (distinct
-                          (keep (fn [col]
-                                  (when-let [others (:primary-key-with col)]
-                                    (let [all-cols (into [(:id col)] others)]
-                                      {:line (str "PRIMARY KEY(" (str/join ", " (mapv ddl-col-name all-cols)) ")")})))
-                                table-cols))
-        fk (keep (fn [col]
-                    (when-let [ref (:ref col)]
-                      {:line (str "FOREIGN KEY(" (ddl-col-name (:id col))
-                                  ") REFERENCES " (util/col-table-name ref)
-                                  "(" (ddl-col-name ref) ")")}))
-                  table-cols)
+  (let [fk (keep (fn [col]
+                   (when-let [ref (:ref col)]
+                     {:line (str "FOREIGN KEY(" (util/col-col-name (:id col))
+                                 ") REFERENCES " (util/col-table-name ref)
+                                 "(" (util/col-col-name ref) ")")}))
+                 table-cols)
         uniq (keep (fn [col]
                      (when (:unique col)
-                       {:line (str "UNIQUE(" (ddl-col-name (:id col)) ")")}))
-                    table-cols)
-        uniq-with (distinct
-                   (keep (fn [col]
-                           (when-let [others (:unique-with col)]
-                             (let [all-cols (into [(:id col)] others)]
-                               {:line (str "UNIQUE(" (str/join ", " (mapv ddl-col-name all-cols)) ")")})))
-                         table-cols))]
-    (concat primary-key-with fk uniq uniq-with)))
+                       {:line (str "UNIQUE(" (util/col-col-name (:id col)) ")")}))
+                     table-cols)
+        uniq-with (keep (fn [col]
+                          (when-let [others (:unique-with col)]
+                            (let [all-cols (into [(:id col)] others)]
+                              {:line (str "UNIQUE(" (str/join ", " (mapv util/col-col-name all-cols)) ")")})))
+                        table-cols)]
+    (concat fk uniq uniq-with)))
 
 (defn- generate-indexes [table-cols]
   (keep (fn [col]
@@ -66,19 +53,13 @@
 (defn- sort-columns
   "Sort columns: primary key first, then required (alphabetically), then optional (alphabetically)."
   [table-cols]
-  (let [composite-pk-cols (into #{}
-                                (mapcat (fn [col]
-                                          (when-let [others (:primary-key-with col)]
-                                            (into [(:id col)] others))))
-                                table-cols)]
-    (sort-by (fn [col]
-               [(cond
-                  (or (:primary-key col)
-                      (contains? composite-pk-cols (:id col))) 0
-                  (:required col) 1
-                  :else 2)
-                (ddl-col-name (:id col))])
-             table-cols)))
+  (sort-by (fn [col]
+             [(cond
+                (:primary-key col) 0
+                (:required col)    1
+                :else              2)
+              (util/col-col-name (:id col))])
+           table-cols))
 
 (defn- generate-create-table [table-name table-cols]
   (let [table-cols (sort-columns table-cols)

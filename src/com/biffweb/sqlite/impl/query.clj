@@ -22,17 +22,21 @@
           select)
     select))
 
+(defn- sql-label->kebab [s]
+  (cond-> (csk/->kebab-case-string s)
+    (str/ends-with? s "_") (str "-")))
+
 (defn- smart-column-names [^ResultSetMetaData rsmeta]
   (mapv (fn [^Integer i]
           (let [label (.getColumnLabel rsmeta i)]
             (if-let [slash-idx (str/index-of label "/")]
-              (keyword (csk/->kebab-case-string (subs label 0 slash-idx))
-                       (csk/->kebab-case-string (subs label (inc slash-idx))))
+              (keyword (sql-label->kebab (subs label 0 slash-idx))
+                       (sql-label->kebab (subs label (inc slash-idx))))
               (let [table (.getTableName rsmeta i)]
                 (if (and table (not= table ""))
-                  (keyword (csk/->kebab-case-string table)
-                           (csk/->kebab-case-string label))
-                  (keyword (csk/->kebab-case-string label)))))))
+                  (keyword (sql-label->kebab table)
+                           (sql-label->kebab label))
+                  (keyword (sql-label->kebab label)))))))
         (range 1 (inc (.getColumnCount rsmeta)))))
 
 (defn smart-kebab-maps

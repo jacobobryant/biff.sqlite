@@ -110,7 +110,6 @@ Columns are defined as a map from qualified keywords to property maps. The keywo
 |-----|------|-------------|
 | `:type` | keyword | **(required)** One of: `:int`, `:real`, `:text`, `:boolean`, `:inst`, `:uuid`, `:enum`, `:edn`, `:blob` |
 | `:primary-key` | boolean | Adds `PRIMARY KEY` constraint (implies `:required`) |
-| `:primary-key-with` | vector | Compound `PRIMARY KEY` constraint with other columns (all participating columns become required) |
 | `:required` | boolean | Adds `NOT NULL` constraint |
 | `:unique` | boolean | Adds `UNIQUE` constraint |
 | `:unique-with` | vector | Compound `UNIQUE` constraint with other columns |
