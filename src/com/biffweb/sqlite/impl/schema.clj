@@ -4,7 +4,8 @@
             [clojure.java.process :as process]
             [clojure.string :as str]
             [clojure.tools.logging :as log]
-            [com.biffweb.sqlite.impl.util :as util]))
+            [com.biffweb.sqlite.impl.util :as util])
+  (:import [java.sql DriverManager]))
 
 (defn- generate-column-def [col]
   (let [col-name (util/col-col-name (:id col))
@@ -33,7 +34,7 @@
         uniq (keep (fn [col]
                      (when (:unique col)
                        {:line (str "UNIQUE(" (util/col-col-name (:id col)) ")")}))
-                   table-cols)
+                     table-cols)
         uniq-with (keep (fn [col]
                           (when-let [others (:unique-with col)]
                             (let [all-cols (into [(:id col)] others)]
@@ -127,14 +128,42 @@
          (when (seq extra-sql)
            (str "\n\n" (str/join "\n" extra-sql))))))
 
+(defn- table-columns [conn table-name]
+  (with-open [stmt (.createStatement conn)
+              rs (.executeQuery stmt (str "PRAGMA table_info(" table-name ")"))]
+    (loop [columns []]
+      (if (.next rs)
+        (recur (conj columns (.getString rs "name")))
+        columns))))
+
+(defn- migrate-legacy-kv-table! [db-path]
+  (when (.exists (io/file db-path))
+    (with-open [conn (DriverManager/getConnection (str "jdbc:sqlite:" db-path))]
+      (let [columns (set (table-columns conn "biff_sqlite_kv"))]
+        (when (= columns #{"namespace" "key_" "value_"})
+          (log/info "Migrating biff_sqlite_kv to add an id primary key.")
+          (.setAutoCommit conn false)
+          (try
+            (doseq [sql ["ALTER TABLE biff_sqlite_kv RENAME TO biff_sqlite_kv_old"
+                         "CREATE TABLE biff_sqlite_kv (id BLOB PRIMARY KEY NOT NULL, key_ TEXT NOT NULL, namespace TEXT NOT NULL, value_ BLOB NOT NULL, UNIQUE(namespace, key_)) STRICT"
+                         "INSERT INTO biff_sqlite_kv (id, key_, namespace, value_) SELECT randomblob(16), key_, namespace, value_ FROM biff_sqlite_kv_old"
+                         "DROP TABLE biff_sqlite_kv_old"]]
+              (with-open [stmt (.createStatement conn)]
+                (.executeUpdate stmt sql)))
+            (.commit conn)
+            (catch Throwable t
+              (.rollback conn)
+              (throw t))))))))
+
 (defn apply-schema!
   "Generate schema SQL from column definitions, write to schema-path,
    and run sqlite3def to apply migrations."
   [db-path schema-path columns extra-sql sqlite3def-path]
   (io/make-parents db-path)
   (io/make-parents schema-path)
+  (migrate-legacy-kv-table! db-path)
   (let [full-sql (generate-schema-sql columns extra-sql)
-        _ (spit schema-path full-sql)
-        result (process/exec sqlite3def-path db-path "--apply" "-f" schema-path)]
+         _ (spit schema-path full-sql)
+         result (process/exec sqlite3def-path db-path "--apply" "-f" schema-path)]
     (when (not-empty result)
       (log/info result))))

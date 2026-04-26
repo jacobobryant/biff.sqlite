@@ -1,5 +1,6 @@
 (ns com.biffweb.sqlite
-  "SQLite integration for Biff: connection pooling, schema migrations, and query execution.
+  "SQLite integration for Biff: connection pooling, schema migrations, query execution,
+   and a built-in key/value store.
 
    Public API:
    - `use-sqlite`          — Biff component for schema migrations, connection pooling, and litestream replication.
@@ -7,20 +8,58 @@
    - `authorized-write`    — Execute INSERT/UPDATE/DELETE with authorization checks.
    - `use-litestream`      — Biff component for litestream replication (called by use-sqlite automatically).
    - `generate-schema-sql` — Generate the complete schema SQL string from column definitions.
-   - `make-resolvers`      — Create biff.inject resolvers for SQLite tables from column definitions.
-   - `auth-module`         — Creates an authentication module backed by SQLite."
+   - `make-resolvers`      — Create biff.inject resolvers for SQLite tables from column definitions."
   (:require
    [clojure.string :as str]
    [clojure.tools.logging :as log]
-   [com.biffweb.authenticate :as biff.auth]
-   [com.biffweb.sqlite.impl.auth :as auth-impl]
    [com.biffweb.sqlite.impl.authorize :as authorize]
    [com.biffweb.sqlite.impl.execute :as exec]
    [com.biffweb.sqlite.impl.litestream :as litestream]
    [com.biffweb.sqlite.impl.pool :as pool]
    [com.biffweb.sqlite.impl.schema :as schema]
    [com.biffweb.sqlite.impl.sqlite3def :as sqlite3def]
-   [com.biffweb.sqlite.impl.util :as util]))
+   [com.biffweb.sqlite.impl.util :as util]
+   [taoensso.nippy :as nippy]))
+
+(def ^:private kv-columns
+  {:biff-sqlite-kv/id {:type :uuid :primary-key true}
+   :biff-sqlite-kv/namespace {:type :text
+                              :required true
+                              :unique-with [:biff-sqlite-kv/key-]}
+   :biff-sqlite-kv/key- {:type :text :required true}
+   :biff-sqlite-kv/value- {:type :blob :required true}})
+
+(defn- validate-kv-args [namespace key]
+  (assert (qualified-keyword? namespace) "namespace must be a qualified keyword")
+  (assert (string? key) "key must be a string"))
+
+(defn- set-kv-value [ctx namespace key value]
+  (validate-kv-args namespace key)
+  (if (nil? value)
+    (do
+      (exec/execute ctx ["DELETE FROM biff_sqlite_kv WHERE namespace = ? AND key_ = ?"
+                         (str namespace)
+                         key])
+      nil)
+    (let [value* (nippy/fast-freeze value)]
+      (exec/execute ctx {:insert-into :biff-sqlite-kv
+                         :values [{:biff-sqlite-kv/id (random-uuid)
+                                   :biff-sqlite-kv/namespace (str namespace)
+                                   :biff-sqlite-kv/key- key
+                                   :biff-sqlite-kv/value- value*}]
+                         :on-conflict [:biff-sqlite-kv/namespace :biff-sqlite-kv/key-]
+                         :do-update-set {:biff-sqlite-kv/value- value*}})
+      nil)))
+
+(defn- get-kv-value [ctx namespace key]
+  (validate-kv-args namespace key)
+  (some-> (first (exec/execute ctx {:select [:biff-sqlite-kv/value-]
+                                    :from :biff-sqlite-kv
+                                    :where [:and
+                                            [:= :biff-sqlite-kv/namespace (str namespace)]
+                                            [:= :biff-sqlite-kv/key- key]]}))
+          :biff-sqlite-kv/value-
+          nippy/fast-thaw))
 
 (defn generate-schema-sql  "Generate the complete schema SQL string from column definitions.
    Takes a map with :biff.sqlite/columns (map of column-id → column-props)
@@ -107,7 +146,7 @@
       :user/email {:type :text :unique true :required true}}
 
    Column properties:
-     :type         - (required) :int, :real, :text, :boolean, :inst, :uuid, :enum, :edn
+     :type         - (required) :int, :real, :text, :boolean, :inst, :uuid, :enum, :edn, :blob
      :primary-key  - boolean, adds PRIMARY KEY (implies :required)
      :unique       - boolean, adds UNIQUE constraint
      :unique-with  - vector of column keywords, adds compound UNIQUE constraint
@@ -117,10 +156,11 @@
      :schema       - malli schema for validation
      :enum-values  - map of int → keyword (required for :enum type)"
   [{:biff.sqlite/keys [db-path columns extra-sql sqlite3def-version]
-    :or {db-path "storage/sqlite/main.db"}
-    :as ctx}]
+     :or {db-path "storage/sqlite/main.db"}
+     :as ctx}]
   (let [ctx (litestream/use-litestream ctx)
-        cols (util/normalize-columns (or columns {}))
+        columns (merge (or columns {}) kv-columns)
+        cols (util/normalize-columns columns)
         sqlite3def-path (sqlite3def/resolve-bin!
                          (or sqlite3def-version sqlite3def/default-version))
         _ (schema/apply-schema! db-path "resources/schema.sql"
@@ -129,8 +169,11 @@
         write-conn (pool/start-write-conn db-path)]
     (log/info "SQLite connection pool started at" db-path)
     (-> ctx
-        (assoc :biff.sqlite/read-pool read-pool
-               :biff.sqlite/write-conn write-conn)
+        (assoc :biff.sqlite/columns columns
+               :biff.sqlite/read-pool read-pool
+               :biff.sqlite/write-conn write-conn
+               :biff.kv/get-value get-kv-value
+               :biff.kv/set-value set-kv-value)
         (update :biff/stop conj (fn []
                                   (.close write-conn)
                                   (.close read-pool))))))
@@ -141,7 +184,7 @@
   (keyword (namespace k) (subs (name k) 0 (- (count (name k)) 3))))
 
 (defn make-resolvers
-  "Create biff.inject resolvers for SQLite tables from column definitions.
+   "Create biff.inject resolvers for SQLite tables from column definitions.
 
    Takes a map with :biff.sqlite/columns (map of column-keyword → property-map).
    Returns a vector of resolver maps compatible with com.biffweb.inject/build-index.
@@ -150,7 +193,7 @@
    - Takes the table's primary key as input
    - Returns all other columns as output (batch resolver)
    - For ref columns ending in -id, adds a join key without the -id suffix
-     e.g. :post/author-id #uuid \"...\" → :post/author {:user/id #uuid \"...\"}"
+      e.g. :post/author-id #uuid \"...\" → :post/author {:user/id #uuid \"...\"}"
   [{:biff.sqlite/keys [columns]}]
   (let [columns (or columns {})
         by-table (group-by (comp keyword namespace key) columns)]
@@ -158,76 +201,47 @@
      (for [[table-key table-cols] by-table
            :let [table-cols-map (into {} table-cols)
                  pk-entry (first (filter (fn [[_ props]] (:primary-key props)) table-cols-map))
-                 _ (when-not pk-entry
-                     (throw (ex-info (str "No primary key found for table " table-key)
-                                     {:table table-key})))
+                   _ (when-not pk-entry
+                       (throw (ex-info (str "No primary key found for table " table-key)
+                                       {:table table-key})))
                  pk-key (key pk-entry)
-                 non-pk-cols (dissoc table-cols-map pk-key)
-                 ;; Ref columns whose name ends in -id: {col-key ref-target-key}
-                 ref-cols (into {}
-                                (keep (fn [[col-key props]]
-                                        (when (and (:ref props)
-                                                   (str/ends-with? (name col-key) "-id"))
-                                          [col-key (:ref props)])))
-                                non-pk-cols)
-                 ;; Precomputed join mappings: [{:join-key, :col-key, :ref-key}]
-                 join-mappings (mapv (fn [[col-key ref-key]]
-                                      {:join-key (strip-id-suffix col-key)
-                                       :col-key col-key
-                                       :ref-key ref-key})
-                                    ref-cols)
-                 output (vec (concat (keys non-pk-cols) (map :join-key join-mappings)))
-                 resolver-id (keyword "com.biffweb.sqlite"
-                                      (str (name table-key) "-resolver"))]]
-       {:id resolver-id
-        :input [pk-key]
-        :output output
-        :batch true
-        :resolve (fn [ctx inputs]
-                   (let [ids (mapv pk-key inputs)
-                         results (execute ctx {:select :*
-                                              :from table-key
-                                              :where [:in :id ids]})
-                         process-row (fn [row]
-                                       (let [row (reduce
-                                                  (fn [row {:keys [join-key col-key ref-key]}]
-                                                    (let [ref-val (get row col-key)]
-                                                      (cond-> row
-                                                        (some? ref-val) (assoc join-key {ref-key ref-val}))))
-                                                  row
-                                                  join-mappings)]
-                                         (into {} (filter (fn [[_ v]] (some? v))) row)))
-                         results (mapv process-row results)
-                         id->result (into {} (map (juxt pk-key identity)) results)]
-                     (mapv (fn [input]
-                             (get id->result (get input pk-key) {}))
-                           inputs)))}))))
-
-
-;; =============================================================================
-;; Auth module
-;; =============================================================================
-
-(defn auth-module
-  "Creates an authentication module backed by SQLite.
-
-   Wraps `com.biffweb.authenticate/module` with SQLite-backed implementations
-   for the DB store keys. Returns a map with :routes and :biff.sqlite/columns.
-
-   The :biff.sqlite/columns value contains the schema for the biff-auth-signin
-   table. Merge it into your app's column definitions.
-
-   Usage:
-     (auth-module
-       (merge {:biff.auth/app-path \"/app\"
-               :biff.auth/send-email (fn [ctx params] ...)}
-              biff.auth/turnstile-config))
-
-   All options from `com.biffweb.authenticate/module` are supported. The DB
-   provided automatically — you don't need to supply them.
-
-   You may override :biff.auth/create-user! if you need custom user creation
-   logic (e.g. setting additional fields on the user record)."
-  [options]
-  (let [module (biff.auth/module (merge auth-impl/db-fns options))]
-    (assoc module :biff.sqlite/columns auth-impl/auth-signin-columns)))
+                   non-pk-cols (dissoc table-cols-map pk-key)
+                    ;; Ref columns whose name ends in -id: {col-key ref-target-key}
+                    ref-cols (into {}
+                                   (keep (fn [[col-key props]]
+                                         (when (and (:ref props)
+                                                    (str/ends-with? (name col-key) "-id"))
+                                           [col-key (:ref props)])))
+                                 non-pk-cols)
+                   ;; Precomputed join mappings: [{:join-key, :col-key, :ref-key}]
+                   join-mappings (mapv (fn [[col-key ref-key]]
+                                        {:join-key (strip-id-suffix col-key)
+                                         :col-key col-key
+                                        :ref-key ref-key})
+                                     ref-cols)
+                   output (vec (concat (keys non-pk-cols) (map :join-key join-mappings)))
+                   resolver-id (keyword "com.biffweb.sqlite"
+                                        (str (name table-key) "-resolver"))]]
+         {:id resolver-id
+          :input [pk-key]
+          :output output
+          :batch true
+          :resolve (fn [ctx inputs]
+                     (let [ids (mapv pk-key inputs)
+                           results (execute ctx {:select :*
+                                                 :from table-key
+                                                 :where [:in pk-key ids]})
+                           process-row (fn [row]
+                                         (let [row (dissoc row pk-key)
+                                               row (reduce
+                                                    (fn [row {:keys [join-key col-key ref-key]}]
+                                                      (let [ref-val (get row col-key)]
+                                                        (cond-> row
+                                                          (some? ref-val) (assoc join-key {ref-key ref-val}))))
+                                                    row
+                                                    join-mappings)]
+                                           (into {} (filter (fn [[_ v]] (some? v))) row)))
+                           id->result (into {} (map (juxt pk-key process-row)) results)]
+                       (mapv (fn [input]
+                               (get id->result (get input pk-key) {}))
+                             inputs)))}))))

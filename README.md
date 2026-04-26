@@ -2,7 +2,7 @@
 
 NOTE: not officially released yet. AI-generated. See https://biffweb.com/p/biff2/
 
-A SQLite integration library for [Biff](https://biffweb.com). Provides connection pooling, declarative schema migrations, automatic type coercion, input validation, [Litestream](https://litestream.io/) replication, and [sqlite3def](https://github.com/sqldef/sqldef) migration support.
+A SQLite integration library for [Biff](https://biffweb.com). Provides connection pooling, declarative schema migrations, automatic type coercion, input validation, a built-in key/value store, [Litestream](https://litestream.io/) replication, and [sqlite3def](https://github.com/sqldef/sqldef) migration support.
 
 ## Installation
 
@@ -47,6 +47,11 @@ io.github.jacobobryant/biff.sqlite {:git/tag "..." :git/sha "..."}
                                     :user/joined-at (java.time.Instant/now)
                                     :user/active true
                                     :user/role :user.role/member}]})
+
+;; Generic kv helpers are added to ctx by use-sqlite.
+((:biff.kv/set-value ctx) ctx :demo/settings "theme" {:mode :dark})
+((:biff.kv/get-value ctx) ctx :demo/settings "theme")
+;; => {:mode :dark}
 ```
 
 ## Public API
@@ -103,7 +108,7 @@ Columns are defined as a map from qualified keywords to property maps. The keywo
 
 | Key | Type | Description |
 |-----|------|-------------|
-| `:type` | keyword | **(required)** One of: `:int`, `:real`, `:text`, `:boolean`, `:inst`, `:uuid`, `:enum`, `:edn` |
+| `:type` | keyword | **(required)** One of: `:int`, `:real`, `:text`, `:boolean`, `:inst`, `:uuid`, `:enum`, `:edn`, `:blob` |
 | `:primary-key` | boolean | Adds `PRIMARY KEY` constraint (implies `:required`) |
 | `:required` | boolean | Adds `NOT NULL` constraint |
 | `:unique` | boolean | Adds `UNIQUE` constraint |
@@ -124,9 +129,22 @@ Values are automatically coerced between Clojure and SQLite:
 | `:boolean` | `true`/`false` | `INT` (0/1) |
 | `:enum` | namespaced keyword | `INT` |
 | `:edn` | map, vector, list, or set | `BLOB` (nippy) |
+| `:blob` | byte array | `BLOB` |
 | `:text` | `String` | `TEXT` |
 | `:int` | `long` | `INT` |
 | `:real` | `double` | `REAL` |
+
+## Built-in KV Store
+
+`use-sqlite` automatically adds a `biff_sqlite_kv` table and puts these
+functions on the returned ctx:
+
+| Key | Signature | Description |
+|-----|-----------|-------------|
+| `:biff.kv/set-value` | `(fn [ctx namespace key value])` | Upserts a nippy-encoded value, or deletes the entry when `value` is `nil` |
+| `:biff.kv/get-value` | `(fn [ctx namespace key])` | Returns a thawed value or `nil` |
+
+`namespace` must be a qualified keyword and `key` must be a string.
 
 ## Litestream Replication
 

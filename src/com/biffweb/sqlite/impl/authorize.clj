@@ -14,7 +14,7 @@
      (let [pk-col (first (filter (fn [col]
                                    (and (= table-kw (util/col-table (:id col)))
                                         (:primary-key col)))
-                                  normalized-columns))]
+                                 normalized-columns))]
        (when pk-col (:id pk-col))))))
 
 (defn- extract-table
@@ -85,7 +85,7 @@
           returning-stmt (assoc stmt :returning [:*])
           write-sql (format-and-coerce returning-stmt enum-val->int)
           after-rows (execute-sql! write-tx write-sql builder-fn)
-          after-by-pk (into {} (map (fn [row] [(get row pk-key) (into {} row)])) after-rows)
+          after-by-pk (into {} (map (juxt pk-key #(into {} %))) after-rows)
           ;; Query the read transaction for before-values using the PKs from the write result
           pks (vec (keys after-by-pk))
           before-rows (when (seq pks)
@@ -94,7 +94,7 @@
                                            :where [:in pk-key pks]}
                               select-sql (format-and-coerce select-stmt enum-val->int)]
                           (execute-sql! read-tx select-sql builder-fn)))
-          before-by-pk (into {} (map (fn [row] [(get row pk-key) (into {} row)])) before-rows)
+          before-by-pk (into {} (map (juxt pk-key #(into {} %))) before-rows)
           all-pks (distinct (concat (keys before-by-pk) (keys after-by-pk)))]
       (into []
        (mapcat
@@ -135,9 +135,9 @@
                     {:statement stmt}))))
 
 (defn- validate-no-pk-changes!
-  "Validate that the statement does not attempt to change primary key columns.
-   For UPDATE: asserts that :set is a map with keyword keys, none of which are primary keys.
-   For UPSERT: asserts that :do-update-set is a vector of keywords not containing primary keys."
+  "Validate that the statement does not attempt to change the primary key column.
+   For UPDATE: asserts that :set is a map with keyword keys and does not contain the primary key.
+   For UPSERT: asserts that :do-update-set is a vector of keywords and does not contain the primary key."
   [stmt stmt-type normalized-columns]
   (let [table-kw (extract-table stmt)
         pk-key (find-primary-key normalized-columns table-kw)]

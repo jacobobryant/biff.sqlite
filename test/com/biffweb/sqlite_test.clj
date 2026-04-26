@@ -134,6 +134,13 @@
           sql (schema/generate-schema-sql (util/normalize-columns columns) [])]
       (is (str/includes? sql "digest_days BLOB")))))
 
+(deftest schema-sql-blob-type-test
+  (testing "blob type generates BLOB column"
+    (let [columns {:asset/id   {:type :uuid :primary-key true}
+                   :asset/data {:type :blob}}
+          sql (schema/generate-schema-sql (util/normalize-columns columns) [])]
+      (is (str/includes? sql "data BLOB")))))
+
 (deftest schema-sql-topo-sort-test
   (testing "tables are ordered by foreign key dependencies"
     (let [columns {:post/id        {:type :uuid :primary-key true}
@@ -225,6 +232,67 @@
                :biff.sqlite/columns test-columns}]
       (is (= [{:user/id "u1"}]
              (biff.sqlite/execute ctx {:select :id :from :user}))))))
+
+(deftest kv-store-roundtrip-test
+  (let [db-file (java.io.File/createTempFile "biff-sqlite-kv" ".db")
+        db-path (.getAbsolutePath db-file)]
+    (.delete db-file)
+    (try
+      (let [ctx (biff.sqlite/use-sqlite {:biff/stop []
+                                         :biff.sqlite/db-path db-path
+                                         :biff.sqlite/columns test-columns})
+            set-value (:biff.kv/set-value ctx)
+            get-value (:biff.kv/get-value ctx)]
+        (is (contains? (:biff.sqlite/columns ctx) :biff-sqlite-kv/namespace))
+        (set-value ctx :demo/settings "theme" {:mode :dark})
+        (is (= {:mode :dark}
+               (get-value ctx :demo/settings "theme")))
+        (set-value ctx :demo/settings "theme" {:mode :light})
+        (is (= {:mode :light}
+               (get-value ctx :demo/settings "theme")))
+        (set-value ctx :demo/settings "theme" nil)
+        (is (nil? (get-value ctx :demo/settings "theme")))
+        (is (thrown? AssertionError
+                     (set-value ctx "demo/settings" "theme" :bad)))
+        (is (thrown? AssertionError
+                     (set-value ctx :settings "theme" :bad)))
+        (is (thrown? AssertionError
+                     (get-value ctx :demo/settings :theme)))
+        ((first (:biff/stop ctx))))
+      (finally
+        (.delete (java.io.File. db-path))
+        (.delete (java.io.File. (str db-path "-wal")))
+        (.delete (java.io.File. (str db-path "-shm")))))))
+
+(deftest kv-store-migrates-legacy-composite-schema-test
+  (let [db-file (java.io.File/createTempFile "biff-sqlite-kv-migrate" ".db")
+        db-path (.getAbsolutePath db-file)
+        frozen (nippy/fast-freeze {:mode :dark})]
+    (.delete db-file)
+    (try
+      (with-open [conn (jdbc/get-connection (str "jdbc:sqlite:" db-path))]
+        (jdbc/execute! conn ["CREATE TABLE biff_sqlite_kv (namespace TEXT NOT NULL, key_ TEXT NOT NULL, value_ BLOB NOT NULL, PRIMARY KEY(namespace, key_)) STRICT"])
+        (jdbc/execute! conn ["INSERT INTO biff_sqlite_kv (namespace, key_, value_) VALUES (?, ?, ?)"
+                             ":demo/settings"
+                             "theme"
+                             frozen]))
+      (let [ctx (biff.sqlite/use-sqlite {:biff/stop []
+                                         :biff.sqlite/db-path db-path
+                                         :biff.sqlite/columns test-columns})
+            set-value (:biff.kv/set-value ctx)
+            get-value (:biff.kv/get-value ctx)
+            kv-rows (biff.sqlite/execute ctx {:select :* :from :biff-sqlite-kv})]
+        (is (= {:mode :dark}
+               (get-value ctx :demo/settings "theme")))
+        (is (uuid? (:biff-sqlite-kv/id (first kv-rows))))
+        (set-value ctx :demo/settings "theme" {:mode :light})
+        (is (= {:mode :light}
+               (get-value ctx :demo/settings "theme")))
+        ((first (:biff/stop ctx))))
+      (finally
+        (.delete (java.io.File. db-path))
+        (.delete (java.io.File. (str db-path "-wal")))
+        (.delete (java.io.File. (str db-path "-shm")))))))
 
 ;; --- Namespaced alias tests ---
 
@@ -651,12 +719,12 @@
            clojure.lang.ExceptionInfo #"does not allow changing primary key"
            (biff.sqlite/authorized-write
             ctx
-            {:insert-into :user
-             :values [{:user/id "u1"
-                       :user/name "Alice2"
-                       :user/joined-at (Instant/ofEpochMilli 1700000000000)}]
-             :on-conflict [:user/id]
-             :do-update-set [:user/id :user/name]}))))))
+             {:insert-into :user
+              :values [{:user/id "u1"
+                        :user/name "Alice2"
+                        :user/joined-at (Instant/ofEpochMilli 1700000000000)}]
+              :on-conflict [:user/id]
+              :do-update-set [:user/id :user/name]}))))))
 
 (deftest authorized-write-rejects-replace-into-test
   (testing "replace-into throws"
