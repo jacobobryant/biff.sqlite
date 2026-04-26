@@ -11,6 +11,7 @@
     :inst    inst?
     :uuid    :uuid
     :edn     [:or map? set? vector? list?]
+    :blob    bytes?
     :enum    (into [:enum] (vals (:enum-values col)))))
 
 (defn- validation-schema [col]

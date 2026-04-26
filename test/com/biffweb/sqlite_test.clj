@@ -134,6 +134,13 @@
           sql (schema/generate-schema-sql (util/normalize-columns columns) [])]
       (is (str/includes? sql "digest_days BLOB")))))
 
+(deftest schema-sql-blob-type-test
+  (testing "blob type generates BLOB column"
+    (let [columns {:asset/id   {:type :uuid :primary-key true}
+                   :asset/data {:type :blob}}
+          sql (schema/generate-schema-sql (util/normalize-columns columns) [])]
+      (is (str/includes? sql "data BLOB")))))
+
 (deftest schema-sql-topo-sort-test
   (testing "tables are ordered by foreign key dependencies"
     (let [columns {:post/id        {:type :uuid :primary-key true}
@@ -225,6 +232,33 @@
                :biff.sqlite/columns test-columns}]
       (is (= [{:user/id "u1"}]
              (biff.sqlite/execute ctx {:select :id :from :user}))))))
+
+(deftest kv-store-roundtrip-test
+  (let [db-file (java.io.File/createTempFile "biff-sqlite-kv" ".db")
+        db-path (.getAbsolutePath db-file)]
+    (.delete db-file)
+    (try
+      (let [ctx (biff.sqlite/use-sqlite {:biff/stop []
+                                         :biff.sqlite/db-path db-path
+                                         :biff.sqlite/columns test-columns})
+            set-value (:biff.kv/set-value ctx)
+            get-value (:biff.kv/get-value ctx)]
+        (is (contains? (:biff.sqlite/columns ctx) :biff-sqlite-kv/namespace-str))
+        (set-value ctx :demo/settings "theme" {:mode :dark})
+        (is (= {:mode :dark}
+               (get-value ctx :demo/settings "theme")))
+        (set-value ctx :demo/settings "theme" {:mode :light})
+        (is (= {:mode :light}
+               (get-value ctx :demo/settings "theme")))
+        (is (thrown? AssertionError
+                     (set-value ctx "demo/settings" "theme" :bad)))
+        (is (thrown? AssertionError
+                     (get-value ctx :demo/settings :theme)))
+        ((first (:biff/stop ctx))))
+      (finally
+        (.delete (java.io.File. db-path))
+        (.delete (java.io.File. (str db-path "-wal")))
+        (.delete (java.io.File. (str db-path "-shm")))))))
 
 ;; --- Namespaced alias tests ---
 

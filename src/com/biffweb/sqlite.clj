@@ -1,5 +1,6 @@
 (ns com.biffweb.sqlite
-  "SQLite integration for Biff: connection pooling, schema migrations, and query execution.
+  "SQLite integration for Biff: connection pooling, schema migrations, query execution,
+   and a built-in key/value store.
 
    Public API:
    - `use-sqlite`          — Biff component for schema migrations, connection pooling, and litestream replication.
@@ -7,20 +8,52 @@
    - `authorized-write`    — Execute INSERT/UPDATE/DELETE with authorization checks.
    - `use-litestream`      — Biff component for litestream replication (called by use-sqlite automatically).
    - `generate-schema-sql` — Generate the complete schema SQL string from column definitions.
-   - `make-resolvers`      — Create biff.inject resolvers for SQLite tables from column definitions.
-   - `auth-module`         — Creates an authentication module backed by SQLite."
+   - `make-resolvers`      — Create biff.inject resolvers for SQLite tables from column definitions."
   (:require
    [clojure.string :as str]
    [clojure.tools.logging :as log]
-   [com.biffweb.authenticate :as biff.auth]
-   [com.biffweb.sqlite.impl.auth :as auth-impl]
    [com.biffweb.sqlite.impl.authorize :as authorize]
    [com.biffweb.sqlite.impl.execute :as exec]
    [com.biffweb.sqlite.impl.litestream :as litestream]
    [com.biffweb.sqlite.impl.pool :as pool]
    [com.biffweb.sqlite.impl.schema :as schema]
    [com.biffweb.sqlite.impl.sqlite3def :as sqlite3def]
-   [com.biffweb.sqlite.impl.util :as util]))
+   [com.biffweb.sqlite.impl.util :as util]
+   [taoensso.nippy :as nippy]))
+
+(def ^:private kv-columns
+  {:biff-sqlite-kv/id {:type :uuid :primary-key true}
+   :biff-sqlite-kv/namespace-str {:type :text
+                                  :required true
+                                  :unique-with [:biff-sqlite-kv/key-str]}
+   :biff-sqlite-kv/key-str {:type :text :required true}
+   :biff-sqlite-kv/value-blob {:type :blob :required true}})
+
+(defn- validate-kv-args [namespace key]
+  (assert (keyword? namespace) "namespace must be a keyword")
+  (assert (string? key) "key must be a string"))
+
+(defn- set-kv-value [ctx namespace key value]
+  (validate-kv-args namespace key)
+  (let [value* (nippy/fast-freeze value)]
+    (exec/execute ctx {:insert-into :biff-sqlite-kv
+                       :values [{:biff-sqlite-kv/id (random-uuid)
+                                 :biff-sqlite-kv/namespace-str (str namespace)
+                                 :biff-sqlite-kv/key-str key
+                                 :biff-sqlite-kv/value-blob value*}]
+                       :on-conflict [:biff-sqlite-kv/namespace-str :biff-sqlite-kv/key-str]
+                       :do-update-set {:biff-sqlite-kv/value-blob value*}})
+    nil))
+
+(defn- get-kv-value [ctx namespace key]
+  (validate-kv-args namespace key)
+  (some-> (first (exec/execute ctx {:select [:biff-sqlite-kv/value-blob]
+                                    :from :biff-sqlite-kv
+                                    :where [:and
+                                            [:= :biff-sqlite-kv/namespace-str (str namespace)]
+                                            [:= :biff-sqlite-kv/key-str key]]}))
+          :biff-sqlite-kv/value-blob
+          nippy/fast-thaw))
 
 (defn generate-schema-sql  "Generate the complete schema SQL string from column definitions.
    Takes a map with :biff.sqlite/columns (map of column-id → column-props)
@@ -107,7 +140,7 @@
       :user/email {:type :text :unique true :required true}}
 
    Column properties:
-     :type         - (required) :int, :real, :text, :boolean, :inst, :uuid, :enum, :edn
+     :type         - (required) :int, :real, :text, :boolean, :inst, :uuid, :enum, :edn, :blob
      :primary-key  - boolean, adds PRIMARY KEY (implies :required)
      :unique       - boolean, adds UNIQUE constraint
      :unique-with  - vector of column keywords, adds compound UNIQUE constraint
@@ -117,10 +150,11 @@
      :schema       - malli schema for validation
      :enum-values  - map of int → keyword (required for :enum type)"
   [{:biff.sqlite/keys [db-path columns extra-sql sqlite3def-version]
-    :or {db-path "storage/sqlite/main.db"}
-    :as ctx}]
+     :or {db-path "storage/sqlite/main.db"}
+     :as ctx}]
   (let [ctx (litestream/use-litestream ctx)
-        cols (util/normalize-columns (or columns {}))
+        columns (merge (or columns {}) kv-columns)
+        cols (util/normalize-columns columns)
         sqlite3def-path (sqlite3def/resolve-bin!
                          (or sqlite3def-version sqlite3def/default-version))
         _ (schema/apply-schema! db-path "resources/schema.sql"
@@ -129,8 +163,11 @@
         write-conn (pool/start-write-conn db-path)]
     (log/info "SQLite connection pool started at" db-path)
     (-> ctx
-        (assoc :biff.sqlite/read-pool read-pool
-               :biff.sqlite/write-conn write-conn)
+        (assoc :biff.sqlite/columns columns
+               :biff.sqlite/read-pool read-pool
+               :biff.sqlite/write-conn write-conn
+               :biff.kv/get-value get-kv-value
+               :biff.kv/set-value set-kv-value)
         (update :biff/stop conj (fn []
                                   (.close write-conn)
                                   (.close read-pool))))))
@@ -202,32 +239,3 @@
                      (mapv (fn [input]
                              (get id->result (get input pk-key) {}))
                            inputs)))}))))
-
-
-;; =============================================================================
-;; Auth module
-;; =============================================================================
-
-(defn auth-module
-  "Creates an authentication module backed by SQLite.
-
-   Wraps `com.biffweb.authenticate/module` with SQLite-backed implementations
-   for the DB store keys. Returns a map with :routes and :biff.sqlite/columns.
-
-   The :biff.sqlite/columns value contains the schema for the biff-auth-signin
-   table. Merge it into your app's column definitions.
-
-   Usage:
-     (auth-module
-       (merge {:biff.auth/app-path \"/app\"
-               :biff.auth/send-email (fn [ctx params] ...)}
-              biff.auth/turnstile-config))
-
-   All options from `com.biffweb.authenticate/module` are supported. The DB
-   provided automatically — you don't need to supply them.
-
-   You may override :biff.auth/create-user! if you need custom user creation
-   logic (e.g. setting additional fields on the user record)."
-  [options]
-  (let [module (biff.auth/module (merge auth-impl/db-fns options))]
-    (assoc module :biff.sqlite/columns auth-impl/auth-signin-columns)))

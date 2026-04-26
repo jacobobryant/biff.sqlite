@@ -33,7 +33,8 @@
     :boolean "INT"
     :inst    "INT"
     :enum    "INT"
-    :edn     "BLOB"))
+    :edn     "BLOB"
+    :blob    "BLOB"))
 
 (defn normalize-columns
   "Convert public map format {kw {:type ...}} to internal vector-of-maps format.
