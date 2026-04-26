@@ -264,6 +264,36 @@
         (.delete (java.io.File. (str db-path "-wal")))
         (.delete (java.io.File. (str db-path "-shm")))))))
 
+(deftest kv-store-migrates-legacy-composite-schema-test
+  (let [db-file (java.io.File/createTempFile "biff-sqlite-kv-migrate" ".db")
+        db-path (.getAbsolutePath db-file)
+        frozen (nippy/fast-freeze {:mode :dark})]
+    (.delete db-file)
+    (try
+      (with-open [conn (jdbc/get-connection (str "jdbc:sqlite:" db-path))]
+        (jdbc/execute! conn ["CREATE TABLE biff_sqlite_kv (namespace TEXT NOT NULL, key_ TEXT NOT NULL, value_ BLOB NOT NULL, PRIMARY KEY(namespace, key_)) STRICT"])
+        (jdbc/execute! conn ["INSERT INTO biff_sqlite_kv (namespace, key_, value_) VALUES (?, ?, ?)"
+                             ":demo/settings"
+                             "theme"
+                             frozen]))
+      (let [ctx (biff.sqlite/use-sqlite {:biff/stop []
+                                         :biff.sqlite/db-path db-path
+                                         :biff.sqlite/columns test-columns})
+            set-value (:biff.kv/set-value ctx)
+            get-value (:biff.kv/get-value ctx)
+            kv-rows (biff.sqlite/execute ctx {:select :* :from :biff-sqlite-kv})]
+        (is (= {:mode :dark}
+               (get-value ctx :demo/settings "theme")))
+        (is (uuid? (:biff-sqlite-kv/id (first kv-rows))))
+        (set-value ctx :demo/settings "theme" {:mode :light})
+        (is (= {:mode :light}
+               (get-value ctx :demo/settings "theme")))
+        ((first (:biff/stop ctx))))
+      (finally
+        (.delete (java.io.File. db-path))
+        (.delete (java.io.File. (str db-path "-wal")))
+        (.delete (java.io.File. (str db-path "-shm")))))))
+
 ;; --- Namespaced alias tests ---
 
 (deftest namespaced-alias-honeysql-test
