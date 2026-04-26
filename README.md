@@ -110,6 +110,7 @@ Columns are defined as a map from qualified keywords to property maps. The keywo
 |-----|------|-------------|
 | `:type` | keyword | **(required)** One of: `:int`, `:real`, `:text`, `:boolean`, `:inst`, `:uuid`, `:enum`, `:edn`, `:blob` |
 | `:primary-key` | boolean | Adds `PRIMARY KEY` constraint (implies `:required`) |
+| `:primary-key-with` | vector | Compound `PRIMARY KEY` constraint with other columns (all participating columns become required) |
 | `:required` | boolean | Adds `NOT NULL` constraint |
 | `:unique` | boolean | Adds `UNIQUE` constraint |
 | `:unique-with` | vector | Compound `UNIQUE` constraint with other columns |
@@ -141,10 +142,10 @@ functions on the returned ctx:
 
 | Key | Signature | Description |
 |-----|-----------|-------------|
-| `:biff.kv/set-value` | `(fn [ctx namespace key value])` | Upserts a nippy-encoded value |
+| `:biff.kv/set-value` | `(fn [ctx namespace key value])` | Upserts a nippy-encoded value, or deletes the entry when `value` is `nil` |
 | `:biff.kv/get-value` | `(fn [ctx namespace key])` | Returns a thawed value or `nil` |
 
-`namespace` must be a keyword and `key` must be a string.
+`namespace` must be a qualified keyword and `key` must be a string.
 
 ## Litestream Replication
 

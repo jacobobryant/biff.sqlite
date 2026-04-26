@@ -38,12 +38,19 @@
 
 (defn normalize-columns
   "Convert public map format {kw {:type ...}} to internal vector-of-maps format.
-   Also ensures :primary-key implies :required."
+   Also ensures primary key columns imply :required."
   [columns]
-  (mapv (fn [[id props]]
-          (cond-> (assoc props :id id)
-            (:primary-key props) (assoc :required true)))
-        columns))
+  (let [composite-pk-cols (into #{}
+                                (mapcat (fn [[id props]]
+                                          (when-let [others (:primary-key-with props)]
+                                            (into [id] others))))
+                                columns)]
+    (mapv (fn [[id props]]
+            (cond-> (assoc props :id id)
+              (or (:primary-key props)
+                  (contains? composite-pk-cols id))
+              (assoc :required true)))
+          columns)))
 
 (defn write-statement?
   "Returns true if the SQL string is a write statement."

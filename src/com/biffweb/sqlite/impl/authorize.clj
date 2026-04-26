@@ -7,15 +7,40 @@
             [honey.sql :as hsql]
             [next.jdbc :as jdbc]))
 
-(def ^:private find-primary-key
-  "Find the primary key column for the given table keyword from normalized columns. Memoized."
+(def ^:private find-primary-keys
+  "Find the primary key columns for the given table keyword from normalized columns. Memoized."
   (memoize
    (fn [normalized-columns table-kw]
-     (let [pk-col (first (filter (fn [col]
-                                   (and (= table-kw (util/col-table (:id col)))
-                                        (:primary-key col)))
-                                  normalized-columns))]
-       (when pk-col (:id pk-col))))))
+      (let [table-cols (filter (fn [col]
+                                 (= table-kw (util/col-table (:id col))))
+                               normalized-columns)
+            pk-cols (into []
+                          (comp (filter :primary-key)
+                                (map :id))
+                          table-cols)]
+        (or (not-empty pk-cols)
+            (some (fn [col]
+                    (when-let [others (:primary-key-with col)]
+                      (vec (into [(:id col)] others))))
+                  table-cols))))))
+
+(defn- pk-token [pk-keys row]
+  (if (= 1 (count pk-keys))
+    (get row (first pk-keys))
+    (mapv row pk-keys)))
+
+(defn- pk-where-clause [pk-keys tokens]
+  (when (seq tokens)
+    (if (= 1 (count pk-keys))
+      [:in (first pk-keys) (vec tokens)]
+      (into [:or]
+            (map (fn [token]
+                   (into [:and]
+                         (map (fn [pk-key value]
+                                [:= pk-key value])
+                              pk-keys
+                              token))))
+            tokens))))
 
 (defn- extract-table
   "Extract the table keyword from a HoneySQL statement map."
@@ -77,24 +102,24 @@
    4. Pair before/after by primary key to generate diff entries"
   [read-tx write-tx stmt normalized-columns builder-fn enum-val->int]
   (let [table-kw (extract-table stmt)
-        pk-key (find-primary-key normalized-columns table-kw)]
-    (when-not pk-key
+        pk-keys (find-primary-keys normalized-columns table-kw)]
+    (when-not (seq pk-keys)
       (throw (ex-info "authorized-write requires a primary key for UPDATE/upsert statements."
                       {:table table-kw})))
     (let [;; Execute the write with :returning :* on the write transaction
           returning-stmt (assoc stmt :returning [:*])
           write-sql (format-and-coerce returning-stmt enum-val->int)
           after-rows (execute-sql! write-tx write-sql builder-fn)
-          after-by-pk (into {} (map (fn [row] [(get row pk-key) (into {} row)])) after-rows)
+          after-by-pk (into {} (map (fn [row] [(pk-token pk-keys row) (into {} row)])) after-rows)
           ;; Query the read transaction for before-values using the PKs from the write result
           pks (vec (keys after-by-pk))
           before-rows (when (seq pks)
                         (let [select-stmt {:select [:*]
                                            :from table-kw
-                                           :where [:in pk-key pks]}
+                                           :where (pk-where-clause pk-keys pks)}
                               select-sql (format-and-coerce select-stmt enum-val->int)]
                           (execute-sql! read-tx select-sql builder-fn)))
-          before-by-pk (into {} (map (fn [row] [(get row pk-key) (into {} row)])) before-rows)
+          before-by-pk (into {} (map (fn [row] [(pk-token pk-keys row) (into {} row)])) before-rows)
           all-pks (distinct (concat (keys before-by-pk) (keys after-by-pk)))]
       (into []
        (mapcat
@@ -140,8 +165,8 @@
    For UPSERT: asserts that :do-update-set is a vector of keywords not containing primary keys."
   [stmt stmt-type normalized-columns]
   (let [table-kw (extract-table stmt)
-        pk-key (find-primary-key normalized-columns table-kw)]
-    (when pk-key
+        pk-keys (find-primary-keys normalized-columns table-kw)]
+    (when (seq pk-keys)
       (case stmt-type
         :update
         (let [set-val (:set stmt)]
@@ -151,10 +176,10 @@
           (when-not (every? keyword? (keys set-val))
             (throw (ex-info "authorized-write UPDATE requires all :set keys to be keywords."
                             {:set-keys (keys set-val)})))
-          (when (contains? set-val pk-key)
+          (when (some #(contains? set-val %) pk-keys)
             (throw (ex-info (str "authorized-write does not allow changing primary key columns. "
-                                 "Found primary key " pk-key " in :set.")
-                            {:primary-key pk-key :set-keys (keys set-val)}))))
+                                 "Found primary key(s) " pk-keys " in :set.")
+                            {:primary-keys pk-keys :set-keys (keys set-val)}))))
 
         :upsert
         (let [update-set (:do-update-set stmt)]
@@ -164,10 +189,10 @@
           (when-not (every? keyword? update-set)
             (throw (ex-info "authorized-write UPSERT requires all :do-update-set entries to be keywords."
                             {:do-update-set update-set})))
-          (when (some #{pk-key} update-set)
+          (when (some (set pk-keys) update-set)
             (throw (ex-info (str "authorized-write does not allow changing primary key columns. "
-                                 "Found primary key " pk-key " in :do-update-set.")
-                            {:primary-key pk-key :do-update-set update-set}))))
+                                 "Found primary key(s) " pk-keys " in :do-update-set.")
+                            {:primary-keys pk-keys :do-update-set update-set}))))
 
         nil))))
 

@@ -112,6 +112,16 @@
           sql (schema/generate-schema-sql (util/normalize-columns columns) [])]
       (is (str/includes? sql "UNIQUE(email)")))))
 
+(deftest schema-sql-composite-primary-key-test
+  (testing "composite primary keys from :primary-key-with"
+    (let [columns {:membership/user-id  {:type :text :primary-key-with [:membership/group-id]}
+                   :membership/group-id {:type :text}
+                   :membership/role     {:type :text}}
+          sql (schema/generate-schema-sql (util/normalize-columns columns) [])]
+      (is (str/includes? sql "user_id TEXT NOT NULL"))
+      (is (str/includes? sql "group_id TEXT NOT NULL"))
+      (is (str/includes? sql "PRIMARY KEY(user_id, group_id)")))))
+
 (deftest schema-sql-foreign-key-test
   (testing "foreign key constraints from :ref"
     (let [columns {:account/id     {:type :text :primary-key true}
@@ -243,15 +253,19 @@
                                          :biff.sqlite/columns test-columns})
             set-value (:biff.kv/set-value ctx)
             get-value (:biff.kv/get-value ctx)]
-        (is (contains? (:biff.sqlite/columns ctx) :biff-sqlite-kv/namespace-str))
+        (is (contains? (:biff.sqlite/columns ctx) :biff-sqlite-kv/namespace))
         (set-value ctx :demo/settings "theme" {:mode :dark})
         (is (= {:mode :dark}
                (get-value ctx :demo/settings "theme")))
         (set-value ctx :demo/settings "theme" {:mode :light})
         (is (= {:mode :light}
                (get-value ctx :demo/settings "theme")))
+        (set-value ctx :demo/settings "theme" nil)
+        (is (nil? (get-value ctx :demo/settings "theme")))
         (is (thrown? AssertionError
                      (set-value ctx "demo/settings" "theme" :bad)))
+        (is (thrown? AssertionError
+                     (set-value ctx :settings "theme" :bad)))
         (is (thrown? AssertionError
                      (get-value ctx :demo/settings :theme)))
         ((first (:biff/stop ctx))))
@@ -504,6 +518,23 @@
           r (first resolvers)]
       (is (= [:item/label] (:output r))))))
 
+(deftest make-resolvers-composite-primary-key-test
+  (testing "composite primary keys become multi-key resolver inputs"
+    (jdbc/execute! *conn* ["CREATE TABLE membership (user_id TEXT NOT NULL, group_id TEXT NOT NULL, role TEXT NOT NULL, PRIMARY KEY(user_id, group_id)) STRICT"])
+    (jdbc/execute! *conn* ["INSERT INTO membership (user_id, group_id, role) VALUES (?, ?, ?)" "u1" "g1" "owner"])
+    (let [columns {:membership/user-id  {:type :text :primary-key-with [:membership/group-id]}
+                   :membership/group-id {:type :text}
+                   :membership/role     {:type :text :required true}}
+          ctx {:biff.sqlite/read-pool *read-pool*
+               :biff.sqlite/write-conn *write-conn*
+               :biff.sqlite/columns columns}
+          resolver (first (biff.sqlite/make-resolvers ctx))]
+      (is (= [:membership/user-id :membership/group-id] (:input resolver)))
+      (is (= [{:membership/role "owner"} {}]
+             ((:resolve resolver) ctx
+              [{:membership/user-id "u1" :membership/group-id "g1"}
+               {:membership/user-id "u1" :membership/group-id "missing"}]))))))
+
 (deftest make-resolvers-nil-values-test
   (testing "resolver does not return keys with nil values"
     (jdbc/execute! *conn* ["CREATE TABLE entry (id TEXT PRIMARY KEY, title TEXT, author_id TEXT) STRICT"])
@@ -685,12 +716,44 @@
            clojure.lang.ExceptionInfo #"does not allow changing primary key"
            (biff.sqlite/authorized-write
             ctx
-            {:insert-into :user
-             :values [{:user/id "u1"
-                       :user/name "Alice2"
-                       :user/joined-at (Instant/ofEpochMilli 1700000000000)}]
-             :on-conflict [:user/id]
-             :do-update-set [:user/id :user/name]}))))))
+             {:insert-into :user
+              :values [{:user/id "u1"
+                        :user/name "Alice2"
+                        :user/joined-at (Instant/ofEpochMilli 1700000000000)}]
+              :on-conflict [:user/id]
+              :do-update-set [:user/id :user/name]}))))))
+
+(deftest authorized-write-composite-primary-key-test
+  (testing "composite primary keys work for updates and PK changes are rejected"
+    (jdbc/execute! *conn* ["CREATE TABLE membership (user_id TEXT NOT NULL, group_id TEXT NOT NULL, role TEXT NOT NULL, PRIMARY KEY(user_id, group_id)) STRICT"])
+    (jdbc/execute! *conn* ["INSERT INTO membership (user_id, group_id, role) VALUES (?, ?, ?)" "u1" "g1" "member"])
+    (let [columns {:membership/user-id  {:type :text :primary-key-with [:membership/group-id]}
+                   :membership/group-id {:type :text}
+                   :membership/role     {:type :text :required true}}
+          ctx {:biff.sqlite/read-pool *read-pool*
+               :biff.sqlite/write-conn *write-conn*
+               :biff.sqlite/columns columns
+               :biff.sqlite/authorize allow-all}
+          diff (biff.sqlite/authorized-write
+                ctx
+                {:update :membership
+                 :set {:membership/role "owner"}
+                 :where [:and
+                         [:= :membership/user-id "u1"]
+                         [:= :membership/group-id "g1"]]})]
+      (is (= 1 (count diff)))
+      (is (= :update (-> diff first :op)))
+      (is (= "member" (-> diff first :before :membership/role)))
+      (is (= "owner" (-> diff first :after :membership/role)))
+      (is (thrown-with-msg?
+           clojure.lang.ExceptionInfo #"does not allow changing primary key"
+           (biff.sqlite/authorized-write
+            ctx
+            {:update :membership
+             :set {:membership/group-id "g2"}
+             :where [:and
+                     [:= :membership/user-id "u1"]
+                     [:= :membership/group-id "g1"]]}))))))
 
 (deftest authorized-write-rejects-replace-into-test
   (testing "replace-into throws"
