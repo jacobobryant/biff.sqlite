@@ -12,6 +12,7 @@
   (:require
    [clojure.string :as str]
    [clojure.tools.logging :as log]
+   [com.biffweb.fx :as fx]
    [com.biffweb.sqlite.impl.authorize :as authorize]
    [com.biffweb.sqlite.impl.execute :as exec]
    [com.biffweb.sqlite.impl.litestream :as litestream]
@@ -85,6 +86,10 @@
   [ctx input]
   (exec/execute ctx input))
 
+(defmethod fx/handle :biff.sqlite.fx/execute
+  [_fx-key ctx input]
+  (execute ctx input))
+
 (defn authorized-write
   "Execute an INSERT, UPDATE, or DELETE statement with authorization checks.
 
@@ -118,6 +123,10 @@
                     {})))
   (locking exec/write-lock
     (authorize/authorized-write! ctx input)))
+
+(defmethod fx/handle :biff.sqlite.fx/authorized-write
+  [_fx-key ctx input]
+  (authorized-write ctx input))
 
 (defn use-litestream
   "Biff component for litestream replication. Downloads the litestream binary

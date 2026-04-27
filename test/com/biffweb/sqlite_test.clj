@@ -2,6 +2,7 @@
   (:require
    [clojure.string :as str]
    [clojure.test :refer [deftest is testing use-fixtures]]
+   [com.biffweb.fx :as fx]
    [com.biffweb.sqlite :as biff.sqlite]
    [com.biffweb.sqlite.impl.coerce :as coerce]
    [com.biffweb.sqlite.impl.query :as query]
@@ -58,6 +59,36 @@
     (testing "non-SELECT statement does not fail"
       (is (= [{:next.jdbc/update-count 0}]
              (biff.sqlite/execute ctx ["DELETE FROM user WHERE id = ?" "nonexistent"]))))))
+
+(deftest handle-execute-test
+  (let [ctx {:biff.sqlite/read-pool *read-pool*
+             :biff.sqlite/write-conn *write-conn*
+             :biff.sqlite/columns test-columns}]
+    (is (= [{:user/id "u1"
+             :user/name "Alice"
+             :user/joined-at (Instant/ofEpochMilli 1700000000000)}]
+           (fx/handle :biff.sqlite.fx/execute
+                      ctx
+                      ["SELECT id, name, joined_at FROM user"])))))
+
+(deftest handle-authorized-write-test
+  (let [ctx {:biff.sqlite/read-pool *read-pool*
+             :biff.sqlite/write-conn *write-conn*
+             :biff.sqlite/columns test-columns
+             :biff.sqlite/authorize (constantly true)}
+        joined-at (Instant/ofEpochMilli 1700000001000)
+        diff (fx/handle :biff.sqlite.fx/authorized-write
+                        ctx
+                        {:insert-into :user
+                         :values [{:user/id "u2"
+                                   :user/name "Bob"
+                                   :user/joined-at joined-at}]})]
+    (is (= :create (:op (first diff))))
+    (is (= [{:user/name "Bob"}]
+           (biff.sqlite/execute ctx
+                                {:select [:user/name]
+                                 :from :user
+                                 :where [:= :user/id "u2"]})))))
 
 ;; --- Schema SQL generation tests ---
 
