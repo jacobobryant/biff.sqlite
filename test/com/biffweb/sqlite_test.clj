@@ -269,7 +269,7 @@
         db-path (.getAbsolutePath db-file)]
     (.delete db-file)
     (try
-      (let [ctx (biff.sqlite/use-sqlite {:biff/stop []
+      (let [ctx (biff.sqlite/use-sqlite {:biff.core/stop []
                                          :biff.sqlite/db-path db-path
                                          :biff.sqlite/columns test-columns})
             set-value (:biff.kv/set-value ctx)
@@ -289,7 +289,7 @@
                      (set-value ctx :settings "theme" :bad)))
         (is (thrown? AssertionError
                      (get-value ctx :demo/settings :theme)))
-        ((first (:biff/stop ctx))))
+        ((first (:biff.core/stop ctx))))
       (finally
         (.delete (java.io.File. db-path))
         (.delete (java.io.File. (str db-path "-wal")))
@@ -307,7 +307,7 @@
                              ":demo/settings"
                              "theme"
                              frozen]))
-      (let [ctx (biff.sqlite/use-sqlite {:biff/stop []
+      (let [ctx (biff.sqlite/use-sqlite {:biff.core/stop []
                                          :biff.sqlite/db-path db-path
                                          :biff.sqlite/columns test-columns})
             set-value (:biff.kv/set-value ctx)
@@ -319,7 +319,7 @@
         (set-value ctx :demo/settings "theme" {:mode :light})
         (is (= {:mode :light}
                (get-value ctx :demo/settings "theme")))
-        ((first (:biff/stop ctx))))
+        ((first (:biff.core/stop ctx))))
       (finally
         (.delete (java.io.File. db-path))
         (.delete (java.io.File. (str db-path "-wal")))

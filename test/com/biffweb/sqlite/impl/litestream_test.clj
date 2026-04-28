@@ -30,7 +30,7 @@
 
 (deftest use-litestream-skips-when-not-configured
   (testing "returns context unchanged when S3 config is absent"
-    (let [ctx {:biff/stop []
+    (let [ctx {:biff.core/stop []
                :biff.sqlite/db-path "storage/sqlite/main.db"}
           result (litestream/use-litestream ctx)]
       (is (= ctx result)))))
