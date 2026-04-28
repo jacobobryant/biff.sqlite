@@ -233,4 +233,4 @@
       (write-config! ctx)
       (restore! ctx bin-path)
       (let [process (start-replicate! ctx bin-path)]
-        (update ctx :biff/stop conj #(stop-replicate! process))))))
+        (update ctx :biff.core/stop conj #(stop-replicate! process))))))

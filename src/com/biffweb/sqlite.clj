@@ -183,9 +183,9 @@
                :biff.sqlite/write-conn write-conn
                :biff.kv/get-value get-kv-value
                :biff.kv/set-value set-kv-value)
-        (update :biff/stop conj (fn []
-                                  (.close write-conn)
-                                  (.close read-pool))))))
+        (update :biff.core/stop conj (fn []
+                                       (.close write-conn)
+                                       (.close read-pool))))))
 
 (defn- strip-id-suffix
   "Remove -id suffix from a keyword name: :post/author-id -> :post/author"
