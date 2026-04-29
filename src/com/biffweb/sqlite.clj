@@ -86,10 +86,6 @@
   [ctx input]
   (exec/execute ctx input))
 
-(defmethod fx/handle :biff.sqlite.fx/execute
-  [_fx-key ctx input]
-  (execute ctx input))
-
 (defn authorized-write
   "Execute an INSERT, UPDATE, or DELETE statement with authorization checks.
 
@@ -124,9 +120,9 @@
   (locking exec/write-lock
     (authorize/authorized-write! ctx input)))
 
-(defmethod fx/handle :biff.sqlite.fx/authorized-write
-  [_fx-key ctx input]
-  (authorized-write ctx input))
+(def fx-handlers
+  {:biff.sqlite.fx/execute execute
+   :biff.sqlite.fx/authorized-write authorized-write})
 
 (defn use-litestream
   "Biff component for litestream replication. Downloads the litestream binary

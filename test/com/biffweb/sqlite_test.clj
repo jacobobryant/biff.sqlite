@@ -67,9 +67,9 @@
     (is (= [{:user/id "u1"
              :user/name "Alice"
              :user/joined-at (Instant/ofEpochMilli 1700000000000)}]
-           (fx/handle :biff.sqlite.fx/execute
-                      ctx
-                      ["SELECT id, name, joined_at FROM user"])))))
+           ((:biff.sqlite.fx/execute biff.sqlite/fx-handlers)
+            ctx
+            ["SELECT id, name, joined_at FROM user"])))))
 
 (deftest handle-authorized-write-test
   (let [ctx {:biff.sqlite/read-pool *read-pool*
@@ -77,12 +77,12 @@
              :biff.sqlite/columns test-columns
              :biff.sqlite/authorize (constantly true)}
         joined-at (Instant/ofEpochMilli 1700000001000)
-        diff (fx/handle :biff.sqlite.fx/authorized-write
-                        ctx
-                        {:insert-into :user
-                         :values [{:user/id "u2"
-                                   :user/name "Bob"
-                                   :user/joined-at joined-at}]})]
+        diff ((:biff.sqlite.fx/authorized-write biff.sqlite/fx-handlers)
+              ctx
+              {:insert-into :user
+               :values [{:user/id "u2"
+                         :user/name "Bob"
+                         :user/joined-at joined-at}]})]
     (is (= :create (:op (first diff))))
     (is (= [{:user/name "Bob"}]
            (biff.sqlite/execute ctx
