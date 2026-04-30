@@ -3,7 +3,7 @@
    and a built-in key/value store.
 
    Public API:
-   - `module`              — Biff module exposing SQLite init and fx handlers.
+   - `module`              — Biff module exposing SQLite fx handlers.
    - `use-sqlite`          — Biff component for schema migrations, connection pooling, and litestream replication.
    - `execute`             — Execute SQL queries/statements with automatic type coercion and validation.
    - `authorized-write`    — Execute INSERT/UPDATE/DELETE with authorization checks.
@@ -185,8 +185,7 @@
 
 (defn module
   []
-  {:biff.core/init use-sqlite
-   :biff.fx/handlers fx-handlers})
+  {:biff.fx/handlers fx-handlers})
 
 (defn- strip-id-suffix
   "Remove -id suffix from a keyword name: :post/author-id -> :post/author"

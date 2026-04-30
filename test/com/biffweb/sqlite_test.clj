@@ -90,8 +90,7 @@
                                  :where [:= :user/id "u2"]})))))
 
 (deftest module-exposes-fx-handlers
-  (is (= {:biff.core/init biff.sqlite/use-sqlite
-          :biff.fx/handlers biff.sqlite/fx-handlers}
+  (is (= {:biff.fx/handlers biff.sqlite/fx-handlers}
          (biff.sqlite/module))))
 
 ;; --- Schema SQL generation tests ---
