@@ -2,7 +2,6 @@
   (:require
    [clojure.string :as str]
    [clojure.test :refer [deftest is testing use-fixtures]]
-   [com.biffweb.fx :as fx]
    [com.biffweb.sqlite :as biff.sqlite]
    [com.biffweb.sqlite.impl.coerce :as coerce]
    [com.biffweb.sqlite.impl.query :as query]
@@ -89,6 +88,11 @@
                                 {:select [:user/name]
                                  :from :user
                                  :where [:= :user/id "u2"]})))))
+
+(deftest module-exposes-fx-handlers
+  (is (= {:biff.core/init biff.sqlite/use-sqlite
+          :biff.fx/handlers biff.sqlite/fx-handlers}
+         (biff.sqlite/module))))
 
 ;; --- Schema SQL generation tests ---
 

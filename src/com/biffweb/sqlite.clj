@@ -3,6 +3,7 @@
    and a built-in key/value store.
 
    Public API:
+   - `module`              — Biff module exposing SQLite init and fx handlers.
    - `use-sqlite`          — Biff component for schema migrations, connection pooling, and litestream replication.
    - `execute`             — Execute SQL queries/statements with automatic type coercion and validation.
    - `authorized-write`    — Execute INSERT/UPDATE/DELETE with authorization checks.
@@ -10,13 +11,12 @@
    - `generate-schema-sql` — Generate the complete schema SQL string from column definitions.
    - `make-resolvers`      — Create biff.inject resolvers for SQLite tables from column definitions."
   (:require
-   [clojure.string :as str]
-   [clojure.tools.logging :as log]
-   [com.biffweb.fx :as fx]
-   [com.biffweb.sqlite.impl.authorize :as authorize]
-   [com.biffweb.sqlite.impl.execute :as exec]
-   [com.biffweb.sqlite.impl.litestream :as litestream]
-   [com.biffweb.sqlite.impl.pool :as pool]
+    [clojure.string :as str]
+    [clojure.tools.logging :as log]
+    [com.biffweb.sqlite.impl.authorize :as authorize]
+    [com.biffweb.sqlite.impl.execute :as exec]
+    [com.biffweb.sqlite.impl.litestream :as litestream]
+    [com.biffweb.sqlite.impl.pool :as pool]
    [com.biffweb.sqlite.impl.schema :as schema]
    [com.biffweb.sqlite.impl.sqlite3def :as sqlite3def]
    [com.biffweb.sqlite.impl.util :as util]
@@ -182,6 +182,11 @@
         (update :biff.core/stop conj (fn []
                                        (.close write-conn)
                                        (.close read-pool))))))
+
+(defn module
+  []
+  {:biff.core/init use-sqlite
+   :biff.fx/handlers fx-handlers})
 
 (defn- strip-id-suffix
   "Remove -id suffix from a keyword name: :post/author-id -> :post/author"
