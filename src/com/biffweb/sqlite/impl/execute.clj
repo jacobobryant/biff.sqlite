@@ -11,6 +11,10 @@
 
 (def write-lock (Object.))
 
+(defn- run-on-tx! [ctx]
+  (when-let [on-tx (:biff.db/on-tx ctx)]
+    (on-tx ctx)))
+
 (defn execute
   [ctx input]
   (let [{:biff.sqlite/keys [columns read-pool write-conn]} ctx
@@ -24,8 +28,11 @@
                   (map? input) (hsql/format input)
                   (string? input) [input]
                   :else input)
-        sql-vec (into [(first sql-vec)] (coerce/coerce-params enum-val->int (rest sql-vec)))
-        opts {:builder-fn builder-fn}]
-    (if (util/write-statement? (first sql-vec))
-      (locking write-lock (jdbc/execute! write-conn sql-vec opts))
-      (jdbc/execute! read-pool sql-vec opts))))
+         sql-vec (into [(first sql-vec)] (coerce/coerce-params enum-val->int (rest sql-vec)))
+         opts {:builder-fn builder-fn}]
+     (if (util/write-statement? (first sql-vec))
+       (locking write-lock
+         (let [result (jdbc/execute! write-conn sql-vec opts)]
+           (run-on-tx! ctx)
+           result))
+       (jdbc/execute! read-pool sql-vec opts))))
