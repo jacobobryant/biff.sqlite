@@ -90,8 +90,19 @@
                                  :where [:= :user/id "u2"]})))))
 
 (deftest module-exposes-fx-handlers
-  (is (= {:biff.fx/handlers biff.sqlite/fx-handlers}
-         (biff.sqlite/module))))
+  (let [module (biff.sqlite/module)
+        on-tx-calls (atom [])
+        init ((:biff.core/init module)
+              (atom [{:biff.db/on-tx (fn [ctx] (swap! on-tx-calls conj [:a ctx]))}
+                     {:biff.db/on-tx (fn [ctx] (swap! on-tx-calls conj [:b ctx]))}]))]
+    (is (= biff.sqlite/fx-handlers (:biff.fx/handlers module)))
+    (is (fn? (:biff.core/init module)))
+    (is (fn? (:biff.db/get-kv init)))
+    (is (fn? (:biff.db/list-kv init)))
+    (is (fn? (:biff.db/set-kv init)))
+    ((:biff.db/on-tx init) {:demo true})
+    (is (= [[:a {:demo true}] [:b {:demo true}]]
+           @on-tx-calls))))
 
 ;; --- Schema SQL generation tests ---
 
@@ -272,31 +283,56 @@
         db-path (.getAbsolutePath db-file)]
     (.delete db-file)
     (try
-      (let [ctx (biff.sqlite/use-sqlite {:biff.core/stop []
-                                         :biff.sqlite/db-path db-path
-                                         :biff.sqlite/columns test-columns})
-            set-value (:biff.kv/set-value ctx)
-            get-value (:biff.kv/get-value ctx)]
-        (is (contains? (:biff.sqlite/columns ctx) :biff-sqlite-kv/namespace))
-        (set-value ctx :demo/settings "theme" {:mode :dark})
-        (is (= {:mode :dark}
-               (get-value ctx :demo/settings "theme")))
-        (set-value ctx :demo/settings "theme" {:mode :light})
-        (is (= {:mode :light}
-               (get-value ctx :demo/settings "theme")))
+       (let [ctx (biff.sqlite/use-sqlite {:biff.core/stop []
+                                          :biff.sqlite/db-path db-path
+                                          :biff.sqlite/columns test-columns})
+             set-value (:biff.kv/set-value ctx)
+             get-value (:biff.kv/get-value ctx)
+             list-kv (:biff.db/list-kv ctx)]
+         (is (contains? (:biff.sqlite/columns ctx) :biff-sqlite-kv/namespace))
+         (set-value ctx :demo/settings "theme" {:mode :dark})
+         (set-value ctx :demo/settings "theme-2" {:mode :blue})
+         (is (= {:mode :dark}
+                (get-value ctx :demo/settings "theme")))
+         (is (= ["theme" "theme-2"]
+                (list-kv ctx :demo/settings "theme")))
+         (is (= ["theme" "theme-2"]
+                (list-kv ctx :demo/settings nil)))
+         (set-value ctx :demo/settings "theme" {:mode :light})
+         (is (= {:mode :light}
+                (get-value ctx :demo/settings "theme")))
         (set-value ctx :demo/settings "theme" nil)
         (is (nil? (get-value ctx :demo/settings "theme")))
         (is (thrown? AssertionError
                      (set-value ctx "demo/settings" "theme" :bad)))
         (is (thrown? AssertionError
                      (set-value ctx :settings "theme" :bad)))
-        (is (thrown? AssertionError
-                     (get-value ctx :demo/settings :theme)))
-        ((first (:biff.core/stop ctx))))
-      (finally
-        (.delete (java.io.File. db-path))
-        (.delete (java.io.File. (str db-path "-wal")))
-        (.delete (java.io.File. (str db-path "-shm")))))))
+         (is (thrown? AssertionError
+                      (get-value ctx :demo/settings :theme)))
+         (is (thrown? AssertionError
+                      (list-kv ctx :demo/settings :theme)))
+         ((first (:biff.core/stop ctx))))
+       (finally
+         (.delete (java.io.File. db-path))
+         (.delete (java.io.File. (str db-path "-wal")))
+         (.delete (java.io.File. (str db-path "-shm")))))))
+
+(deftest execute-and-authorized-write-run-on-tx-test
+  (let [calls (atom [])
+        ctx {:biff.sqlite/read-pool *read-pool*
+             :biff.sqlite/write-conn *write-conn*
+             :biff.sqlite/columns test-columns
+             :biff.db/on-tx (fn [_] (swap! calls conj :called))
+             :biff.sqlite/authorize (constantly true)}]
+    (biff.sqlite/execute ctx {:insert-into :user
+                              :values [{:user/id "u2"
+                                        :user/name "Bob"
+                                        :user/joined-at (Instant/ofEpochMilli 1700000000000)}]})
+    (biff.sqlite/authorized-write ctx
+                                  {:update :user
+                                   :set {:user/name "Robert"}
+                                   :where [:= :user/id "u2"]})
+    (is (= [:called :called] @calls))))
 
 (deftest kv-store-migrates-legacy-composite-schema-test
   (let [db-file (java.io.File/createTempFile "biff-sqlite-kv-migrate" ".db")

@@ -34,6 +34,11 @@
   (assert (qualified-keyword? namespace) "namespace must be a qualified keyword")
   (assert (string? key) "key must be a string"))
 
+(defn- validate-kv-prefix-args [namespace key-prefix]
+  (assert (qualified-keyword? namespace) "namespace must be a qualified keyword")
+  (assert (or (nil? key-prefix) (string? key-prefix))
+          "key-prefix must be nil or a string"))
+
 (defn- set-kv-value [ctx namespace key value]
   (validate-kv-args namespace key)
   (if (nil? value)
@@ -61,6 +66,27 @@
                                             [:= :biff-sqlite-kv/key- key]]}))
           :biff-sqlite-kv/value-
           nippy/fast-thaw))
+
+(defn- list-kv-values [ctx namespace key-prefix]
+  (validate-kv-prefix-args namespace key-prefix)
+  (->> (exec/execute
+        ctx
+        (cond-> {:select [:biff-sqlite-kv/key-]
+                 :from :biff-sqlite-kv
+                 :where [:= :biff-sqlite-kv/namespace (str namespace)]
+                 :order-by [[:biff-sqlite-kv/key- :asc]]}
+          key-prefix
+          (update :where
+                  (fn [where]
+                    [:and
+                     where
+                     [:like :biff-sqlite-kv/key- (str key-prefix "%")]]))))
+       (mapv :biff-sqlite-kv/key-)))
+
+(defn- run-on-tx! [ctx result]
+  (when-let [on-tx (:biff.db/on-tx ctx)]
+    (on-tx ctx))
+  result)
 
 (defn generate-schema-sql  "Generate the complete schema SQL string from column definitions.
    Takes a map with :biff.sqlite/columns (map of column-id → column-props)
@@ -118,7 +144,7 @@
     (throw (ex-info "authorized-write requires :biff.sqlite/authorize in ctx."
                     {})))
   (locking exec/write-lock
-    (authorize/authorized-write! ctx input)))
+    (run-on-tx! ctx (authorize/authorized-write! ctx input))))
 
 (def fx-handlers
   {:biff.sqlite.fx/execute execute
@@ -168,24 +194,38 @@
         cols (util/normalize-columns columns)
         sqlite3def-path (sqlite3def/resolve-bin!
                          (or sqlite3def-version sqlite3def/default-version))
-        _ (schema/apply-schema! db-path "resources/schema.sql"
-                                cols (or extra-sql []) sqlite3def-path)
-        read-pool (pool/start-read-pool db-path)
-        write-conn (pool/start-write-conn db-path)]
-    (log/info "SQLite connection pool started at" db-path)
-    (-> ctx
-        (assoc :biff.sqlite/columns columns
-               :biff.sqlite/read-pool read-pool
-               :biff.sqlite/write-conn write-conn
-               :biff.kv/get-value get-kv-value
-               :biff.kv/set-value set-kv-value)
-        (update :biff.core/stop conj (fn []
-                                       (.close write-conn)
-                                       (.close read-pool))))))
+         _ (schema/apply-schema! db-path "resources/schema.sql"
+                                 cols (or extra-sql []) sqlite3def-path)
+         read-pool (pool/start-read-pool db-path)
+         write-conn (pool/start-write-conn db-path)]
+     (log/info "SQLite connection pool started at" db-path)
+     (-> ctx
+         (assoc :biff.sqlite/columns columns
+                :biff.sqlite/read-pool read-pool
+                :biff.sqlite/write-conn write-conn
+                :biff.db/get-kv get-kv-value
+                :biff.db/list-kv list-kv-values
+                :biff.db/set-kv set-kv-value
+                :biff.kv/get-value get-kv-value
+                :biff.kv/set-value set-kv-value)
+         (update :biff.core/stop conj (fn []
+                                        (.close write-conn)
+                                        (.close read-pool))))))
 
 (defn module
   []
-  {:biff.fx/handlers fx-handlers})
+  {:biff.fx/handlers fx-handlers
+   :biff.core/init
+   (fn [modules-var]
+     (let [on-tx-fns (vec (keep :biff.db/on-tx @modules-var))]
+       (cond-> {:biff.db/get-kv get-kv-value
+                :biff.db/list-kv list-kv-values
+                :biff.db/set-kv set-kv-value}
+         (seq on-tx-fns)
+         (assoc :biff.db/on-tx
+                (fn [ctx]
+                  (doseq [on-tx on-tx-fns]
+                    (on-tx ctx)))))))})
 
 (defn- strip-id-suffix
   "Remove -id suffix from a keyword name: :post/author-id -> :post/author"
