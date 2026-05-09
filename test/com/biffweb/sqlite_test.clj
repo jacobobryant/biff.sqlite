@@ -92,9 +92,9 @@
 (deftest module-exposes-fx-handlers
   (let [module (biff.sqlite/module)
         on-tx-calls (atom [])
-        init ((:biff.core/init module)
-              (atom [{:biff.db/on-tx (fn [ctx] (swap! on-tx-calls conj [:a ctx]))}
-                     {:biff.db/on-tx (fn [ctx] (swap! on-tx-calls conj [:b ctx]))}]))]
+        modules-var (atom [{:biff.db/on-tx (fn [ctx] (swap! on-tx-calls conj [:a ctx]))}
+                           {:biff.db/on-tx (fn [ctx] (swap! on-tx-calls conj [:b ctx]))}])
+        init ((:biff.core/init module) modules-var)]
     (is (= biff.sqlite/fx-handlers (:biff.fx/handlers module)))
     (is (fn? (:biff.core/init module)))
     (is (fn? (:biff.db/get-kv init)))
@@ -102,6 +102,11 @@
     (is (fn? (:biff.db/set-kv init)))
     ((:biff.db/on-tx init) {:demo true})
     (is (= [[:a {:demo true}] [:b {:demo true}]]
+           @on-tx-calls))
+    (reset! on-tx-calls [])
+    (swap! modules-var conj {:biff.db/on-tx (fn [ctx] (swap! on-tx-calls conj [:c ctx]))})
+    ((:biff.db/on-tx init) {:demo :updated})
+    (is (= [[:a {:demo :updated}] [:b {:demo :updated}] [:c {:demo :updated}]]
            @on-tx-calls))))
 
 ;; --- Schema SQL generation tests ---

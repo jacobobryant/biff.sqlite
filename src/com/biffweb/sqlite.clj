@@ -217,15 +217,13 @@
   {:biff.fx/handlers fx-handlers
    :biff.core/init
    (fn [modules-var]
-     (let [on-tx-fns (vec (keep :biff.db/on-tx @modules-var))]
-       (cond-> {:biff.db/get-kv get-kv-value
-                :biff.db/list-kv list-kv-values
-                :biff.db/set-kv set-kv-value}
-         (seq on-tx-fns)
-         (assoc :biff.db/on-tx
-                (fn [ctx]
-                  (doseq [on-tx on-tx-fns]
-                    (on-tx ctx)))))))})
+     {:biff.db/get-kv get-kv-value
+      :biff.db/list-kv list-kv-values
+      :biff.db/set-kv set-kv-value
+      :biff.db/on-tx
+      (fn [ctx]
+        (doseq [on-tx (keep :biff.db/on-tx @modules-var)]
+          (on-tx ctx)))})})
 
 (defn- strip-id-suffix
   "Remove -id suffix from a keyword name: :post/author-id -> :post/author"
